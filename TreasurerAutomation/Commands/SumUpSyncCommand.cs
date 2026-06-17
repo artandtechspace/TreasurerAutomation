@@ -36,6 +36,10 @@ namespace TreasurerAutomation.Commands
         [Description("Sets the easyVerein Billing Account ID. Overrides EASYVEREIN_BILLING_ACCOUNT_ID env var.")]
         public int? EasyVereinBillingAccountId { get; set; }
 
+        [CommandOption("--sphere <VALUE>")]
+        [Description("Sets the easyVerein SKR 42 Sphere (1=Ideell, 2=Vermögen, 3=Zweckbetrieb, 4=Wirtschaftlich). Default is 1.")]
+        public int? Sphere { get; set; }
+
         public string ResolvedSumupToken =>
             SumupToken ?? Environment.GetEnvironmentVariable("SUMUP_ACCESS_TOKEN") ?? string.Empty;
 
@@ -54,6 +58,9 @@ namespace TreasurerAutomation.Commands
                 return int.TryParse(envVal, out var val) ? val : 0;
             }
         }
+
+        public int ResolvedSphere =>
+            Sphere ?? (int.TryParse(Environment.GetEnvironmentVariable("EASYVEREIN_SPHERE"), out var val) ? val : 1);
 
         public override ValidationResult Validate()
         {
@@ -272,6 +279,7 @@ namespace TreasurerAutomation.Commands
                                 reference: referenceCode,
                                 counterpartName: "Kartenkunde (via SumUp)",
                                 relatedInvoiceIds: relatedInvoiceIds,
+                                sphere: settings.ResolvedSphere,
                                 cancellationToken: cancellationToken
                             );
 
@@ -489,6 +497,7 @@ namespace TreasurerAutomation.Commands
             string reference,
             string counterpartName = "Kartenkunde (via SumUp)",
             int[]? relatedInvoiceIds = null,
+            int sphere = 1,
             CancellationToken cancellationToken = default)
         {
             var baseUri = new Uri("https://easyverein.com/api/");
@@ -512,7 +521,7 @@ namespace TreasurerAutomation.Commands
                 counterpartIban = string.Empty,
                 counterpartBic = string.Empty,
                 twingoDonation = false,
-                sphere = 0,
+                sphere = sphere,
                 relatedInvoice = relatedInvoiceIds
             };
             var json = JsonSerializer.Serialize(payload);

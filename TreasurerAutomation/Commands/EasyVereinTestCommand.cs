@@ -21,6 +21,10 @@ namespace TreasurerAutomation.Commands
         [Description("Sets the easyVerein Billing Account ID. Overrides EASYVEREIN_BILLING_ACCOUNT_ID env var.")]
         public int? EasyVereinBillingAccountId { get; set; }
 
+        [CommandOption("--sphere <VALUE>")]
+        [Description("Sets the easyVerein SKR 42 Sphere (1=Ideell, 2=Vermögen, 3=Zweckbetrieb, 4=Wirtschaftlich). Default is 1.")]
+        public int? Sphere { get; set; }
+
         public string ResolvedEasyVereinToken =>
             EasyVereinToken ?? Environment.GetEnvironmentVariable("EASYVEREIN_TOKEN") ?? string.Empty;
 
@@ -33,6 +37,9 @@ namespace TreasurerAutomation.Commands
                 return int.TryParse(envVal, out var val) ? val : 0;
             }
         }
+
+        public int ResolvedSphere =>
+            Sphere ?? (int.TryParse(Environment.GetEnvironmentVariable("EASYVEREIN_SPHERE"), out var val) ? val : 1);
 
         public override ValidationResult Validate()
         {
@@ -118,7 +125,7 @@ namespace TreasurerAutomation.Commands
                         // 3. Buchung erstellen und verknüpfen
                         AnsiConsole.MarkupLine($" [blue]ℹ[/] Erstelle Buchung und verknüpfe Beleg...");
                         await CreateEasyVereinBookingAsync(token, amount, date, billingAccountId, description,
-                            "Getränkeverkauf", referenceCode, receiver, new[] { invoiceId }, cancellationToken);
+                            "Getränkeverkauf", referenceCode, receiver, new[] { invoiceId }, settings.ResolvedSphere, cancellationToken);
                         AnsiConsole.MarkupLine("   [green]✔[/] Buchung erfolgreich verknüpft.");
                     });
 
@@ -252,6 +259,7 @@ namespace TreasurerAutomation.Commands
             string reference,
             string counterpartName,
             int[] relatedInvoiceIds,
+            int sphere,
             CancellationToken cancellationToken)
         {
             var baseUri = new Uri("https://easyverein.com/api/");
@@ -271,7 +279,7 @@ namespace TreasurerAutomation.Commands
                 counterpartIban = string.Empty,
                 counterpartBic = string.Empty,
                 twingoDonation = false,
-                sphere = 0,
+                sphere = sphere,
                 relatedInvoice = relatedInvoiceIds
             };
             var json = JsonSerializer.Serialize(payload);
