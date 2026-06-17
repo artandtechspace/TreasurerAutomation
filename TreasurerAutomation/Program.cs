@@ -18,6 +18,8 @@ namespace TreasurerAutomation
                 config.SetApplicationName("dotnet run --");
                 config.AddCommand<SumUpSyncCommand>("sumup-sync")
                       .WithDescription("Synchronizes successful transactions and receipts from SumUp to easyVerein bookings.");
+                config.AddCommand<EasyVereinTestCommand>("easyverein-test")
+                      .WithDescription("Tests the connection, document upload and booking association with easyVerein.");
             });
 
             return await app.RunAsync(args);

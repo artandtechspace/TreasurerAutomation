@@ -197,7 +197,71 @@ namespace TreasurerAutomation.Commands
                             var referenceCode = receipt.TransactionData.TransactionCode ??
                                                 tx.TransactionCode ?? receipt.TransactionData.TransactionId ?? txId;
 
+                            // Fetch Transaction Details (TransactionFull) to find the receipt PNG URL
+                            int? easyVereinInvoiceId = null;
+                            try
+                            {
+                                var txFullApiResponse = await sumUpClient.Transactions.GetAsync(
+                                    settings.ResolvedMerchantCode,
+                                    new SumUp.TransactionsGetOptions { Id = txId },
+                                    cancellationToken: cancellationToken);
+
+                                if (txFullApiResponse.IsSuccess && txFullApiResponse.Data != null)
+                                {
+                                    var txFull = txFullApiResponse.Data;
+                                    var pngLink = txFull.Links?.FirstOrDefault(l =>
+                                        l.Type != null && l.Type.Contains("png", StringComparison.OrdinalIgnoreCase));
+
+                                    if (pngLink == null && txFull.Links != null)
+                                    {
+                                        pngLink = txFull.Links.FirstOrDefault(l =>
+                                            l.Href != null && l.Href.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
+                                    }
+
+                                    if (pngLink != null && !string.IsNullOrEmpty(pngLink.Href))
+                                    {
+                                        AnsiConsole.MarkupLine($"   [blue]ℹ[/] Lade PNG-Beleg von SumUp herunter...");
+                                        var fileBytes = await DownloadSumUpReceiptAsync(pngLink.Href, settings.ResolvedSumupToken, cancellationToken);
+
+                                        AnsiConsole.MarkupLine($"   [blue]ℹ[/] Erstelle Beleg in easyVerein...");
+                                        var invoiceId = await CreateEasyVereinInvoiceAsync(
+                                            easyVereinToken: settings.ResolvedEasyVereinToken,
+                                            amount: parsedAmount,
+                                            date: transactionDate,
+                                            description: description,
+                                            receiver: "Kartenkunde (via SumUp)",
+                                            referenceCode: referenceCode,
+                                            cancellationToken: cancellationToken
+                                        );
+
+                                        AnsiConsole.MarkupLine($"   [blue]ℹ[/] Hochladen des Belegs ({fileBytes.Length} Bytes)...");
+                                        await UploadEasyVereinInvoiceFileAsync(
+                                            easyVereinToken: settings.ResolvedEasyVereinToken,
+                                            invoiceId: invoiceId,
+                                            fileBytes: fileBytes,
+                                            filename: $"receipt_{referenceCode}.png",
+                                            cancellationToken: cancellationToken
+                                        );
+
+                                        easyVereinInvoiceId = invoiceId;
+                                    }
+                                    else
+                                    {
+                                        AnsiConsole.MarkupLine($"   [yellow]⚠[/] Kein PNG-Beleglink für Transaktion {txCode} gefunden.");
+                                    }
+                                }
+                                else
+                                {
+                                    AnsiConsole.MarkupLine($"   [yellow]⚠[/] Transaktionsdetails konnten nicht geladen werden.");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                AnsiConsole.MarkupLine($"   [yellow]⚠[/] Beleg-Download/Upload übersprungen wegen Fehler: {Markup.Escape(ex.Message)}");
+                            }
+
                             // Post to easyVerein
+                            var relatedInvoiceIds = easyVereinInvoiceId.HasValue ? new[] { easyVereinInvoiceId.Value } : null;
                             await CreateEasyVereinBookingAsync(
                                 easyVereinToken: settings.ResolvedEasyVereinToken,
                                 amount: parsedAmount,
@@ -206,7 +270,9 @@ namespace TreasurerAutomation.Commands
                                 description: description,
                                 receiver: "Getränkeverkauf",
                                 reference: referenceCode,
-                                counterpartName: "Kartenkunde (via SumUp)"
+                                counterpartName: "Kartenkunde (via SumUp)",
+                                relatedInvoiceIds: relatedInvoiceIds,
+                                cancellationToken: cancellationToken
                             );
 
                             summaryList.Add((txId, txCode, "[green]Importiert[/]",
@@ -218,7 +284,7 @@ namespace TreasurerAutomation.Commands
                         {
                             summaryList.Add((txId, txCode, "[red]Fehler[/]", ex.Message, txAmountFormatted));
                             AnsiConsole.MarkupLine(
-                                $" [red]✘[/] Fehler bei Transaktion [yellow]{txCode}[/]: {ex.Message}");
+                                $" [red]✘[/] Fehler bei Transaktion [yellow]{txCode}[/]: {Markup.Escape(ex.Message)}");
                         }
                     });
             }
@@ -314,6 +380,116 @@ namespace TreasurerAutomation.Commands
             return string.IsNullOrEmpty(result) ? $"SumUp Transaction {txCode}" : result;
         }
 
+        private static async Task<byte[]> DownloadSumUpReceiptAsync(
+            string url,
+            string token,
+            CancellationToken cancellationToken)
+        {
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36");
+            httpClient.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", token);
+
+            var response = await httpClient.GetAsync(url, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorText = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new Exception($"SumUp Receipt download failed with {response.StatusCode}: {errorText}");
+            }
+
+            return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        }
+
+        private static async Task<int> CreateEasyVereinInvoiceAsync(
+            string easyVereinToken,
+            decimal amount,
+            DateTime date,
+            string description,
+            string receiver,
+            string referenceCode,
+            CancellationToken cancellationToken)
+        {
+            var baseUri = new Uri("https://easyverein.com/api/");
+            using var httpClient = new HttpClient
+            {
+                BaseAddress = baseUri
+            };
+            httpClient.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", easyVereinToken);
+
+            var absAmount = Math.Abs(amount);
+            var payload = new
+            {
+                invNumber = referenceCode,
+                totalPrice = absAmount,
+                receiver = receiver,
+                date = date.ToString("yyyy-MM-dd"),
+                description = description,
+                isReceipt = true,
+                kind = amount >= 0 ? "revenue" : "expense",
+                invoiceItems = new[]
+                {
+                    new
+                    {
+                        title = "SumUp Zahlung",
+                        quantity = 1,
+                        unitPrice = absAmount
+                    }
+                }
+            };
+
+            var json = JsonSerializer.Serialize(payload);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await httpClient.PostAsync("v2.0/invoice", content, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new Exception($"easyVerein Invoice creation returned {response.StatusCode}: {respText}");
+            }
+
+            var respJson = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var doc = JsonDocument.Parse(respJson);
+            if (!doc.RootElement.TryGetProperty("id", out var idProp))
+            {
+                throw new Exception("easyVerein Invoice response did not contain an 'id' property.");
+            }
+
+            return idProp.GetInt32();
+        }
+
+        private static async Task UploadEasyVereinInvoiceFileAsync(
+            string easyVereinToken,
+            int invoiceId,
+            byte[] fileBytes,
+            string filename,
+            CancellationToken cancellationToken)
+        {
+            var baseUri = new Uri("https://easyverein.com/api/");
+            using var httpClient = new HttpClient
+            {
+                BaseAddress = baseUri
+            };
+            httpClient.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", easyVereinToken);
+
+            using var content = new ByteArrayContent(fileBytes);
+            content.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+            content.Headers.ContentDisposition = new ContentDispositionHeaderValue("attachment")
+            {
+                Name = "\"path\"",
+                FileName = $"\"{filename}\""
+            };
+
+            var response = await httpClient.PatchAsync($"v2.0/invoice/{invoiceId}", content, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new Exception($"easyVerein Invoice file upload returned {response.StatusCode}: {respText}");
+            }
+        }
+
         private static async Task CreateEasyVereinBookingAsync(
             string easyVereinToken,
             decimal amount,
@@ -323,6 +499,7 @@ namespace TreasurerAutomation.Commands
             string receiver,
             string reference,
             string counterpartName = "Kartenkunde (via SumUp)",
+            int[]? relatedInvoiceIds = null,
             CancellationToken cancellationToken = default)
         {
             var baseUri = new Uri("https://easyverein.com/api/");
@@ -346,7 +523,8 @@ namespace TreasurerAutomation.Commands
                 counterpartIban = string.Empty,
                 counterpartBic = string.Empty,
                 twingoDonation = false,
-                sphere = 0
+                sphere = 0,
+                relatedInvoice = relatedInvoiceIds
             };
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -354,7 +532,7 @@ namespace TreasurerAutomation.Commands
             var response = await httpClient.PostAsync("v2.0/booking", content, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                var respText = await response.Content.ReadAsStringAsync();
+                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
                 throw new Exception($"easyVerein API returned {response.StatusCode}: {respText}");
             }
         }
