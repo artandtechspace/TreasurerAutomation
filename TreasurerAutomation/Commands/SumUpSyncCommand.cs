@@ -466,13 +466,10 @@ namespace TreasurerAutomation.Commands
             httpClient.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Bearer", easyVereinToken);
 
-            using var content = new ByteArrayContent(fileBytes);
-            content.Headers.ContentType = new MediaTypeHeaderValue("image/png");
-            content.Headers.ContentDisposition = new ContentDispositionHeaderValue("attachment")
-            {
-                Name = "\"path\"",
-                FileName = $"\"{filename}\""
-            };
+            using var content = new MultipartFormDataContent();
+            var fileContent = new ByteArrayContent(fileBytes);
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+            content.Add(fileContent, "path", filename);
 
             var response = await httpClient.PatchAsync($"v2.0/invoice/{invoiceId}", content, cancellationToken);
             if (!response.IsSuccessStatusCode)
