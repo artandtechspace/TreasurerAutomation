@@ -17,29 +17,8 @@ namespace TreasurerAutomation.Commands
         [Description("Sets the easyVerein Token. Overrides EASYVEREIN_TOKEN env var.")]
         public string? EasyVereinToken { get; set; }
 
-        [CommandOption("--billing-account <VALUE>")]
-        [Description("Sets the easyVerein Billing Account ID. Overrides EASYVEREIN_BILLING_ACCOUNT_ID env var.")]
-        public int? EasyVereinBillingAccountId { get; set; }
-
-        [CommandOption("--sphere <VALUE>")]
-        [Description("Sets the easyVerein SKR 42 Sphere (1=Ideell, 2=Vermögen, 3=Zweckbetrieb, 4=Wirtschaftlich). Default is 1.")]
-        public int? Sphere { get; set; }
-
         public string ResolvedEasyVereinToken =>
             EasyVereinToken ?? Environment.GetEnvironmentVariable("EASYVEREIN_TOKEN") ?? string.Empty;
-
-        public int ResolvedEasyVereinBillingAccountId
-        {
-            get
-            {
-                if (EasyVereinBillingAccountId.HasValue) return EasyVereinBillingAccountId.Value;
-                var envVal = Environment.GetEnvironmentVariable("EASYVEREIN_BILLING_ACCOUNT_ID");
-                return int.TryParse(envVal, out var val) ? val : 0;
-            }
-        }
-
-        public int ResolvedSphere =>
-            Sphere ?? (int.TryParse(Environment.GetEnvironmentVariable("EASYVEREIN_SPHERE"), out var val) ? val : 1);
 
         public override ValidationResult Validate()
         {
@@ -63,7 +42,6 @@ namespace TreasurerAutomation.Commands
             Console.WriteLine();
 
             var token = settings.ResolvedEasyVereinToken;
-            var billingAccountId = settings.ResolvedEasyVereinBillingAccountId;
 
             try
             {
@@ -90,26 +68,6 @@ namespace TreasurerAutomation.Commands
                     .SpinnerStyle(Style.Parse("blue bold"))
                     .StartAsync("Führe easyVerein API-Test durch...", async ctx =>
                     {
-                        // 0. Zahlungskonto erstellen, falls nicht übergeben
-                        if (billingAccountId <= 0)
-                        {
-                            var random = new Random();
-                            var accountName = "Test-Zahlungskonto " +
-                                              Guid.NewGuid().ToString("N").Substring(0, 6).ToUpper();
-                            var accountNumber = random.Next(1000, 9999);
-
-                            AnsiConsole.MarkupLine(
-                                $" [blue]ℹ[/] Erstelle Zahlungskonto '{accountName}' (Nr. {accountNumber})...");
-                            billingAccountId = await CreateEasyVereinBillingAccountAsync(token, accountName,
-                                accountNumber, cancellationToken);
-                            AnsiConsole.MarkupLine($"   [green]✔[/] Zahlungskonto ID: {billingAccountId}");
-                        }
-                        else
-                        {
-                            AnsiConsole.MarkupLine(
-                                $" [blue]ℹ[/] Verwende existierendes Zahlungskonto ID: {billingAccountId}");
-                        }
-
                         // 1. Beleg erstellen
                         AnsiConsole.MarkupLine($" [blue]ℹ[/] Erstelle Beleg mit Code '{referenceCode}'...");
                         invoiceId = await CreateEasyVereinInvoiceAsync(token, amount, date, description, receiver,
@@ -121,17 +79,11 @@ namespace TreasurerAutomation.Commands
                         await UploadEasyVereinInvoiceFileAsync(token, invoiceId, dummyPng,
                             $"test_receipt_{referenceCode}.png", cancellationToken);
                         AnsiConsole.MarkupLine("   [green]✔[/] Datei erfolgreich hochgeladen.");
-
-                        // 3. Buchung erstellen und verknüpfen
-                        AnsiConsole.MarkupLine($" [blue]ℹ[/] Erstelle Buchung und verknüpfe Beleg...");
-                        await CreateEasyVereinBookingAsync(token, amount, date, billingAccountId, description,
-                            "Getränkeverkauf", referenceCode, receiver, new[] { invoiceId }, settings.ResolvedSphere, cancellationToken);
-                        AnsiConsole.MarkupLine("   [green]✔[/] Buchung erfolgreich verknüpft.");
                     });
 
                 Console.WriteLine();
                 AnsiConsole.MarkupLine(
-                    "[green]✔ Erfolg:[/] Test erfolgreich abgeschlossen! Zahlungskonto, Beleg mit PNG-Anhang und Buchung wurden in easyVerein angelegt.");
+                    "[green]✔ Erfolg:[/] Test erfolgreich abgeschlossen! Beleg mit PNG-Anhang wurde in easyVerein angelegt (ohne Buchungsverknüpfung).");
             }
             catch (Exception ex)
             {
@@ -141,42 +93,6 @@ namespace TreasurerAutomation.Commands
             }
 
             return 0;
-        }
-
-        private static async Task<int> CreateEasyVereinBillingAccountAsync(
-            string easyVereinToken,
-            string name,
-            int number,
-            CancellationToken cancellationToken)
-        {
-            var baseUri = new Uri("https://easyverein.com/api/");
-            using var httpClient = new HttpClient { BaseAddress = baseUri };
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", easyVereinToken);
-
-            var payload = new
-            {
-                name = name,
-                number = number
-            };
-
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            var response = await httpClient.PostAsync("v2.0/billing-account", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Billing Account creation returned {response.StatusCode}: {respText}");
-            }
-
-            var respJson = await response.Content.ReadAsStringAsync(cancellationToken);
-            using var doc = JsonDocument.Parse(respJson);
-            if (!doc.RootElement.TryGetProperty("id", out var idProp))
-            {
-                throw new Exception("easyVerein Billing Account response did not contain an 'id' property.");
-            }
-
-            return idProp.GetInt32();
         }
 
         private static async Task<int> CreateEasyVereinInvoiceAsync(
@@ -246,50 +162,6 @@ namespace TreasurerAutomation.Commands
             {
                 var respText = await response.Content.ReadAsStringAsync(cancellationToken);
                 throw new Exception($"easyVerein Invoice file upload returned {response.StatusCode}: {respText}");
-            }
-        }
-
-        private static async Task CreateEasyVereinBookingAsync(
-            string easyVereinToken,
-            decimal amount,
-            DateTime date,
-            int billingAccountId,
-            string description,
-            string receiver,
-            string reference,
-            string counterpartName,
-            int[] relatedInvoiceIds,
-            int sphere,
-            CancellationToken cancellationToken)
-        {
-            var baseUri = new Uri("https://easyverein.com/api/");
-            using var httpClient = new HttpClient { BaseAddress = baseUri };
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", easyVereinToken);
-
-            var payload = new
-            {
-                amount = amount,
-                billingAccount = billingAccountId,
-                description = description,
-                date = date.ToString("yyyy-MM-ddTHH:mm:ss"),
-                receiver = receiver,
-                billingId = reference,
-                paymentDifference = 0,
-                counterpartName = counterpartName,
-                counterpartIban = string.Empty,
-                counterpartBic = string.Empty,
-                twingoDonation = false,
-                sphere = sphere,
-                relatedInvoice = relatedInvoiceIds
-            };
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            var response = await httpClient.PostAsync("v2.0/booking", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein API returned {response.StatusCode}: {respText}");
             }
         }
     }

@@ -32,14 +32,6 @@ namespace TreasurerAutomation.Commands
         [Description("Sets the easyVerein Token. Overrides EASYVEREIN_TOKEN env var.")]
         public string? EasyVereinToken { get; set; }
 
-        [CommandOption("--billing-account <VALUE>")]
-        [Description("Sets the easyVerein Billing Account ID. Overrides EASYVEREIN_BILLING_ACCOUNT_ID env var.")]
-        public int? EasyVereinBillingAccountId { get; set; }
-
-        [CommandOption("--sphere <VALUE>")]
-        [Description("Sets the easyVerein SKR 42 Sphere (1=Ideell, 2=Vermögen, 3=Zweckbetrieb, 4=Wirtschaftlich). Default is 1.")]
-        public int? Sphere { get; set; }
-
         public string ResolvedSumupToken =>
             SumupToken ?? Environment.GetEnvironmentVariable("SUMUP_ACCESS_TOKEN") ?? string.Empty;
 
@@ -48,19 +40,6 @@ namespace TreasurerAutomation.Commands
 
         public string ResolvedEasyVereinToken =>
             EasyVereinToken ?? Environment.GetEnvironmentVariable("EASYVEREIN_TOKEN") ?? string.Empty;
-
-        public int ResolvedEasyVereinBillingAccountId
-        {
-            get
-            {
-                if (EasyVereinBillingAccountId.HasValue) return EasyVereinBillingAccountId.Value;
-                var envVal = Environment.GetEnvironmentVariable("EASYVEREIN_BILLING_ACCOUNT_ID");
-                return int.TryParse(envVal, out var val) ? val : 0;
-            }
-        }
-
-        public int ResolvedSphere =>
-            Sphere ?? (int.TryParse(Environment.GetEnvironmentVariable("EASYVEREIN_SPHERE"), out var val) ? val : 1);
 
         public override ValidationResult Validate()
         {
@@ -74,9 +53,6 @@ namespace TreasurerAutomation.Commands
 
             if (string.IsNullOrEmpty(ResolvedEasyVereinToken))
                 missing.Add("EASYVEREIN_TOKEN / --easyverein-token");
-
-            if (ResolvedEasyVereinBillingAccountId <= 0)
-                missing.Add("EASYVEREIN_BILLING_ACCOUNT_ID / --billing-account (must be a positive integer)");
 
             return missing.Count > 0
                 ? ValidationResult.Error("Missing or invalid configuration values: " + string.Join(", ", missing))
@@ -267,26 +243,18 @@ namespace TreasurerAutomation.Commands
                                 AnsiConsole.MarkupLine($"   [yellow]⚠[/] Beleg-Download/Upload übersprungen wegen Fehler: {Markup.Escape(ex.Message)}");
                             }
 
-                            // Post to easyVerein
-                            var relatedInvoiceIds = easyVereinInvoiceId.HasValue ? new[] { easyVereinInvoiceId.Value } : null;
-                            await CreateEasyVereinBookingAsync(
-                                easyVereinToken: settings.ResolvedEasyVereinToken,
-                                amount: parsedAmount,
-                                date: transactionDate,
-                                billingAccountId: settings.ResolvedEasyVereinBillingAccountId,
-                                description: description,
-                                receiver: "Getränkeverkauf",
-                                reference: referenceCode,
-                                counterpartName: "Kartenkunde (via SumUp)",
-                                relatedInvoiceIds: relatedInvoiceIds,
-                                sphere: settings.ResolvedSphere,
-                                cancellationToken: cancellationToken
-                            );
-
-                            summaryList.Add((txId, txCode, "[green]Importiert[/]",
-                                "Erfolgreich nach easyVerein gebucht", txAmountFormatted));
-                            AnsiConsole.MarkupLine(
-                                $" [green]✔[/] Transaktion [yellow]{txCode}[/] ({txAmountFormatted}) erfolgreich importiert.");
+                            if (easyVereinInvoiceId.HasValue)
+                            {
+                                summaryList.Add((txId, txCode, "[green]Importiert[/]",
+                                    "Beleg in easyVerein hinterlegt", txAmountFormatted));
+                                AnsiConsole.MarkupLine(
+                                    $" [green]✔[/] Beleg für Transaktion [yellow]{txCode}[/] ({txAmountFormatted}) erfolgreich hinterlegt.");
+                            }
+                            else
+                            {
+                                summaryList.Add((txId, txCode, "[yellow]Übersprungen[/]",
+                                    "Kein Beleg hochgeladen (fehlender Link/Fehler)", txAmountFormatted));
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -484,54 +452,6 @@ namespace TreasurerAutomation.Commands
             {
                 var respText = await response.Content.ReadAsStringAsync(cancellationToken);
                 throw new Exception($"easyVerein Invoice file upload returned {response.StatusCode}: {respText}");
-            }
-        }
-
-        private static async Task CreateEasyVereinBookingAsync(
-            string easyVereinToken,
-            decimal amount,
-            DateTime date,
-            int billingAccountId,
-            string description,
-            string receiver,
-            string reference,
-            string counterpartName = "Kartenkunde (via SumUp)",
-            int[]? relatedInvoiceIds = null,
-            int sphere = 1,
-            CancellationToken cancellationToken = default)
-        {
-            var baseUri = new Uri("https://easyverein.com/api/");
-            using var httpClient = new HttpClient
-            {
-                BaseAddress = baseUri
-            };
-            httpClient.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", easyVereinToken);
-
-            var payload = new
-            {
-                amount = amount,
-                billingAccount = billingAccountId,
-                description = description,
-                date = date.ToString("yyyy-MM-ddTHH:mm:ss"),
-                receiver = receiver,
-                billingId = reference,
-                paymentDifference = 0,
-                counterpartName = counterpartName,
-                counterpartIban = string.Empty,
-                counterpartBic = string.Empty,
-                twingoDonation = false,
-                sphere = sphere,
-                relatedInvoice = relatedInvoiceIds
-            };
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            var response = await httpClient.PostAsync("v2.0/booking", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein API returned {response.StatusCode}: {respText}");
             }
         }
     }
