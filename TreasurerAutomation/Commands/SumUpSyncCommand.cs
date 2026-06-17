@@ -404,6 +404,7 @@ namespace TreasurerAutomation.Commands
                 description = description,
                 isReceipt = true,
                 isDraft = true,
+                paymentInformation = "Überweisung",
                 kind = amount >= 0 ? "revenue" : "expense"
             };
 
@@ -444,7 +445,10 @@ namespace TreasurerAutomation.Commands
 
             using var content = new MultipartFormDataContent();
             var fileContent = new ByteArrayContent(fileBytes);
-            fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+            string contentType = filename.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
+                ? "application/pdf"
+                : "image/png";
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
             content.Add(fileContent, "path", filename);
 
             var response = await httpClient.PatchAsync($"v2.0/invoice/{invoiceId}", content, cancellationToken);

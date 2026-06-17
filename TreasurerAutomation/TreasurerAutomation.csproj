@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <OutputType>Exe</OutputType>
@@ -11,6 +11,12 @@
       <PackageReference Include="Spectre.Console" Version="0.57.0" />
       <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
       <PackageReference Include="SumUp" Version="0.0.15" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Update="test_receipt.pdf">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
     </ItemGroup>
 
 </Project>

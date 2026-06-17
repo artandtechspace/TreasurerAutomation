@@ -52,16 +52,31 @@ namespace TreasurerAutomation.Commands
                 var referenceCode = "TEST_" + Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper();
                 var receiver = "Kartenkunde (Test)";
 
-                // 1x1 Pixel transparente PNG-Datei
-                byte[] dummyPng = new byte[]
+                byte[] fileBytes;
+                string filename;
+
+                string pdfPath = System.IO.Path.Combine(AppContext.BaseDirectory, "test_receipt.pdf");
+                if (System.IO.File.Exists(pdfPath))
                 {
-                    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
-                    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-                    0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
-                    0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x00, 0x01, 0x00, 0x00,
-                    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-                    0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
-                };
+                    AnsiConsole.MarkupLine($" [blue]ℹ[/] Lese PDF-Belegdatei '{pdfPath}'...");
+                    fileBytes = await System.IO.File.ReadAllBytesAsync(pdfPath, cancellationToken);
+                    filename = $"test_receipt_{referenceCode}.pdf";
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine($" [yellow]⚠[/] PDF-Belegdatei '{pdfPath}' nicht gefunden. Verwende 1x1 Dummy-PNG.");
+                    // 1x1 Pixel transparente PNG-Datei
+                    fileBytes = new byte[]
+                    {
+                        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+                        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+                        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+                        0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x00, 0x01, 0x00, 0x00,
+                        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+                        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+                    };
+                    filename = $"test_receipt_{referenceCode}.png";
+                }
 
                 await AnsiConsole.Status()
                     .Spinner(Spinner.Known.Dots)
@@ -74,16 +89,15 @@ namespace TreasurerAutomation.Commands
                             referenceCode, cancellationToken);
                         AnsiConsole.MarkupLine($"   [green]✔[/] Beleg ID: {invoiceId}");
 
-                        // 2. PNG-Datei hochladen
-                        AnsiConsole.MarkupLine($" [blue]ℹ[/] Lade 1x1 Dummy-PNG hoch...");
-                        await UploadEasyVereinInvoiceFileAsync(token, invoiceId, dummyPng,
-                            $"test_receipt_{referenceCode}.png", cancellationToken);
+                        // 2. Datei hochladen
+                        AnsiConsole.MarkupLine($" [blue]ℹ[/] Lade Belegdatei hoch...");
+                        await UploadEasyVereinInvoiceFileAsync(token, invoiceId, fileBytes, filename, cancellationToken);
                         AnsiConsole.MarkupLine("   [green]✔[/] Datei erfolgreich hochgeladen.");
                     });
 
                 Console.WriteLine();
                 AnsiConsole.MarkupLine(
-                    "[green]✔ Erfolg:[/] Test erfolgreich abgeschlossen! Beleg mit PNG-Anhang wurde in easyVerein angelegt (ohne Buchungsverknüpfung).");
+                    $"[green]✔ Erfolg:[/] Test erfolgreich abgeschlossen! Beleg mit Anhang '{filename}' wurde in easyVerein angelegt (ohne Buchungsverknüpfung).");
             }
             catch (Exception ex)
             {
@@ -118,6 +132,7 @@ namespace TreasurerAutomation.Commands
                 description = description,
                 isReceipt = true,
                 isDraft = true,
+                paymentInformation = "Überweisung",
                 kind = amount >= 0 ? "revenue" : "expense"
             };
 
@@ -154,7 +169,10 @@ namespace TreasurerAutomation.Commands
 
             using var content = new MultipartFormDataContent();
             var fileContent = new ByteArrayContent(fileBytes);
-            fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+            string contentType = filename.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
+                ? "application/pdf"
+                : "image/png";
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
             content.Add(fileContent, "path", filename);
 
             var response = await httpClient.PatchAsync($"v2.0/invoice/{invoiceId}", content, cancellationToken);
