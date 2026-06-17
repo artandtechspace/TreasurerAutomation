@@ -194,16 +194,8 @@ namespace TreasurerAutomation.Commands
                 date = date.ToString("yyyy-MM-dd"),
                 description = description,
                 isReceipt = true,
-                kind = amount >= 0 ? "revenue" : "expense",
-                invoiceItems = new[]
-                {
-                    new
-                    {
-                        title = "SumUp Zahlung",
-                        quantity = 1,
-                        unitPrice = absAmount
-                    }
-                }
+                isDraft = true,
+                kind = amount >= 0 ? "revenue" : "expense"
             };
 
             var json = JsonSerializer.Serialize(payload);
