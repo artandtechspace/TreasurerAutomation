@@ -32,6 +32,14 @@ namespace TreasurerAutomation.Commands
         [Description("Sets the easyVerein Token. Overrides EASYVEREIN_TOKEN env var.")]
         public string? EasyVereinToken { get; set; }
 
+        [CommandOption("--bank-account <VALUE>")]
+        [Description("Sets the easyVerein bank account ID. Overrides EASYVEREIN_BANK_ACCOUNT env var. Defaults to 200571.")]
+        public int? BankAccount { get; set; }
+
+        [CommandOption("--payment-info <VALUE>")]
+        [Description("Sets the easyVerein payment information. Overrides EASYVEREIN_PAYMENT_INFO env var. Defaults to 'Überweisung'.")]
+        public string? PaymentInfo { get; set; }
+
         public string ResolvedSumupToken =>
             SumupToken ?? Environment.GetEnvironmentVariable("SUMUP_ACCESS_TOKEN") ?? string.Empty;
 
@@ -40,6 +48,20 @@ namespace TreasurerAutomation.Commands
 
         public string ResolvedEasyVereinToken =>
             EasyVereinToken ?? Environment.GetEnvironmentVariable("EASYVEREIN_TOKEN") ?? string.Empty;
+
+        public int ResolvedBankAccount
+        {
+            get
+            {
+                if (BankAccount.HasValue) return BankAccount.Value;
+                var envVal = Environment.GetEnvironmentVariable("EASYVEREIN_BANK_ACCOUNT");
+                if (int.TryParse(envVal, out var val)) return val;
+                return 200571;
+            }
+        }
+
+        public string ResolvedPaymentInfo =>
+            PaymentInfo ?? Environment.GetEnvironmentVariable("EASYVEREIN_PAYMENT_INFO") ?? "Überweisung";
 
         public override ValidationResult Validate()
         {
@@ -107,7 +129,7 @@ namespace TreasurerAutomation.Commands
                 {
                     var listApiResponse =
                         await sumUpClient.Transactions.ListAsync(settings.ResolvedMerchantCode, listOptions);
-                    if (listApiResponse != null && listApiResponse.IsSuccess)
+                    if (listApiResponse.IsSuccess)
                     {
                         listResponse = listApiResponse.Data;
                     }
@@ -127,6 +149,9 @@ namespace TreasurerAutomation.Commands
             AnsiConsole.MarkupLine(
                 $"[green]Erfolg:[/] {items.Length} Transaktion(en) gefunden. Starte Import...[reset]");
             Console.WriteLine();
+
+            // Initialize easyVerein API Client
+            using var easyVereinClient = new Services.EasyVereinClient(settings.ResolvedEasyVereinToken);
 
             // Structure to hold summary of executions
             var summaryList = new List<(string TxId, string Code, string Status, string Detail, string Amount)>();
@@ -168,7 +193,6 @@ namespace TreasurerAutomation.Commands
                             }
 
                             var receipt = receiptApiResponse.Data;
-                            var description = BuildDescription(receipt, tx.User);
 
                             if (!decimal.TryParse(receipt.TransactionData.Amount, CultureInfo.InvariantCulture,
                                     out var parsedAmount))
@@ -180,8 +204,19 @@ namespace TreasurerAutomation.Commands
                             var referenceCode = receipt.TransactionData.TransactionCode ??
                                                 tx.TransactionCode ?? receipt.TransactionData.TransactionId ?? txId;
 
-                            // Fetch Transaction Details (TransactionFull) to find the receipt PNG URL
-                            int? easyVereinInvoiceId = null;
+                            // Check for duplicates before executing imports
+                            if (await easyVereinClient.InvoiceExistsAsync(referenceCode, cancellationToken))
+                            {
+                                summaryList.Add((txId, txCode, "[yellow]Übersprungen[/]", "Bereits in easyVerein vorhanden (Duplikatschutz)", txAmountFormatted));
+                                AnsiConsole.MarkupLine($"   [blue]ℹ[/] Beleg '{referenceCode}' existiert bereits. Überspringe Import.");
+                                return;
+                            }
+
+                            // Fetch Transaction Details (TransactionFull) to find the receipt PNG URL and Fee Amount
+                            decimal? feeAmount = null;
+                            decimal? netAmount = null;
+                            string? pngLinkHref = null;
+
                             try
                             {
                                 var txFullApiResponse = await sumUpClient.Transactions.GetAsync(
@@ -192,6 +227,12 @@ namespace TreasurerAutomation.Commands
                                 if (txFullApiResponse.IsSuccess && txFullApiResponse.Data != null)
                                 {
                                     var txFull = txFullApiResponse.Data;
+                                    if (txFull.FeeAmount.HasValue)
+                                    {
+                                        feeAmount = (decimal)txFull.FeeAmount.Value;
+                                        netAmount = parsedAmount - feeAmount.Value;
+                                    }
+
                                     var pngLink = txFull.Links?.FirstOrDefault(l =>
                                         l.Type != null && l.Type.Contains("png", StringComparison.OrdinalIgnoreCase));
 
@@ -201,59 +242,131 @@ namespace TreasurerAutomation.Commands
                                             l.Href != null && l.Href.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
                                     }
 
-                                    if (pngLink != null && !string.IsNullOrEmpty(pngLink.Href))
+                                    if (pngLink != null)
                                     {
-                                        AnsiConsole.MarkupLine($"   [blue]ℹ[/] Lade PNG-Beleg von SumUp herunter...");
-                                        var fileBytes = await DownloadSumUpReceiptAsync(pngLink.Href, settings.ResolvedSumupToken, cancellationToken);
-
-                                        AnsiConsole.MarkupLine($"   [blue]ℹ[/] Erstelle Beleg in easyVerein...");
-                                        var invoiceId = await CreateEasyVereinInvoiceAsync(
-                                            easyVereinToken: settings.ResolvedEasyVereinToken,
-                                            amount: parsedAmount,
-                                            date: transactionDate,
-                                            description: description,
-                                            receiver: "Kartenkunde (via SumUp)",
-                                            referenceCode: referenceCode,
-                                            cancellationToken: cancellationToken
-                                        );
-
-                                        AnsiConsole.MarkupLine($"   [blue]ℹ[/] Hochladen des Belegs ({fileBytes.Length} Bytes)...");
-                                        await UploadEasyVereinInvoiceFileAsync(
-                                            easyVereinToken: settings.ResolvedEasyVereinToken,
-                                            invoiceId: invoiceId,
-                                            fileBytes: fileBytes,
-                                            filename: $"receipt_{referenceCode}.png",
-                                            cancellationToken: cancellationToken
-                                        );
-
-                                        easyVereinInvoiceId = invoiceId;
+                                        pngLinkHref = pngLink.Href;
                                     }
-                                    else
-                                    {
-                                        AnsiConsole.MarkupLine($"   [yellow]⚠[/] Kein PNG-Beleglink für Transaktion {txCode} gefunden.");
-                                    }
-                                }
-                                else
-                                {
-                                    AnsiConsole.MarkupLine($"   [yellow]⚠[/] Transaktionsdetails konnten nicht geladen werden.");
                                 }
                             }
                             catch (Exception ex)
                             {
-                                AnsiConsole.MarkupLine($"   [yellow]⚠[/] Beleg-Download/Upload übersprungen wegen Fehler: {Markup.Escape(ex.Message)}");
+                                AnsiConsole.MarkupLine($"   [yellow]⚠[/] Transaktionsdetails konnten nicht vollständig geladen werden: {Markup.Escape(ex.Message)}");
+                            }
+
+                            var description = BuildDescription(receipt, tx.User, feeAmount, settings.ResolvedBankAccount);
+
+                            int? easyVereinInvoiceId = null;
+                            try
+                            {
+                                byte[]? fileBytes = null;
+                                if (!string.IsNullOrEmpty(pngLinkHref))
+                                {
+                                    AnsiConsole.MarkupLine($"   [blue]ℹ[/] Lade PNG-Beleg von SumUp herunter...");
+                                    fileBytes = await DownloadSumUpReceiptAsync(pngLinkHref, settings.ResolvedSumupToken, cancellationToken);
+                                }
+                                else
+                                {
+                                    AnsiConsole.MarkupLine($"   [yellow]⚠[/] Kein PNG-Beleglink für Transaktion {txCode} gefunden.");
+                                }
+
+                                AnsiConsole.MarkupLine($"   [blue]ℹ[/] Erstelle Beleg (Entwurf) in easyVerein...");
+                                var invoiceId = await easyVereinClient.CreateInvoiceAsync(
+                                    amount: parsedAmount,
+                                    date: transactionDate,
+                                    description: description,
+                                    receiver: "Kartenkunde (via SumUp)",
+                                    referenceCode: referenceCode,
+                                    paymentInformation: settings.ResolvedPaymentInfo,
+                                    bankAccount: settings.ResolvedBankAccount,
+                                    kind: parsedAmount >= 0 ? "revenue" : "expense",
+                                    cancellationToken: cancellationToken
+                                );
+
+                                AnsiConsole.MarkupLine($"   [blue]ℹ[/] Erstelle Position (InvoiceItem) in easyVerein...");
+                                await easyVereinClient.CreateInvoiceItemAsync(
+                                    invoiceId: invoiceId,
+                                    amount: parsedAmount,
+                                    cancellationToken: cancellationToken
+                                );
+
+                                if (fileBytes != null)
+                                {
+                                    AnsiConsole.MarkupLine($"   [blue]ℹ[/] Hochladen des Belegs ({fileBytes.Length} Bytes)...");
+                                    await easyVereinClient.UploadInvoiceFileAsync(
+                                        invoiceId: invoiceId,
+                                        fileBytes: fileBytes,
+                                        filename: $"receipt_{referenceCode}.png",
+                                        cancellationToken: cancellationToken
+                                    );
+                                }
+
+                                AnsiConsole.MarkupLine($"   [blue]ℹ[/] Beleg finalisieren...");
+                                await easyVereinClient.FinalizeInvoiceAsync(
+                                    invoiceId: invoiceId,
+                                    cancellationToken: cancellationToken
+                                );
+
+                                easyVereinInvoiceId = invoiceId;
+                            }
+                            catch (Exception ex)
+                            {
+                                AnsiConsole.MarkupLine($"   [yellow]⚠[/] Beleg-Erstellung in easyVerein übersprungen wegen Fehler: {Markup.Escape(ex.Message)}");
                             }
 
                             if (easyVereinInvoiceId.HasValue)
                             {
                                 summaryList.Add((txId, txCode, "[green]Importiert[/]",
-                                    "Beleg in easyVerein hinterlegt", txAmountFormatted));
-                                AnsiConsole.MarkupLine(
-                                    $" [green]✔[/] Beleg für Transaktion [yellow]{txCode}[/] ({txAmountFormatted}) erfolgreich hinterlegt.");
+                                    "Beleg in easyVerein hinterlegt (Finalisiert)", txAmountFormatted));
+
+                                var tree = new Tree($"[yellow]Transaktion {txCode}[/]");
+                                tree.AddNode($"[grey]Betrag (Brutto):[/] [green]{txAmountFormatted}[/]");
+                                if (feeAmount.HasValue && netAmount.HasValue)
+                                {
+                                    tree.AddNode($"[grey]SumUp-Gebühr:[/] [red]-{feeAmount.Value:N2} €[/]");
+                                    tree.AddNode($"[grey]Netto-Auszahlung:[/] [bold green]{netAmount.Value:N2} €[/]");
+                                }
+                                tree.AddNode($"[grey]Datum (Wertstellung):[/] {transactionDate:yyyy-MM-dd HH:mm:ss}");
+
+                                var paymentNode = tree.AddNode("[grey]Zahlung:[/]");
+                                paymentNode.AddNode($"Zahlungsweise: {settings.ResolvedPaymentInfo}");
+                                if (receipt.TransactionData?.Card != null)
+                                {
+                                    paymentNode.AddNode($"Methode: {receipt.TransactionData.Card.Type} (****{receipt.TransactionData.Card.Last4Digits})");
+                                }
+                                else if (!string.IsNullOrEmpty(receipt.TransactionData?.PaymentType))
+                                {
+                                    paymentNode.AddNode($"Methode: {receipt.TransactionData.PaymentType}");
+                                }
+                                if (receipt.TransactionData?.CardReader != null)
+                                {
+                                    paymentNode.AddNode($"Kartenleser: {receipt.TransactionData.CardReader.Type} ({receipt.TransactionData.CardReader.Code})");
+                                }
+
+                                if (receipt.TransactionData?.Products != null && receipt.TransactionData.Products.Any())
+                                {
+                                    var productsNode = tree.AddNode("[grey]Produkte:[/]");
+                                    foreach (var product in receipt.TransactionData.Products)
+                                    {
+                                        var name = product.Name ?? "Unbenannt";
+                                        var qty = product.Quantity ?? 1.0;
+                                        var price = product.Price ?? "0.00";
+                                        productsNode.AddNode($"{qty:G} × {name} (à {price} €)");
+                                    }
+                                }
+
+                                var evNode = tree.AddNode("[grey]easyVerein Buchungsinfo:[/]");
+                                evNode.AddNode($"[green]✔[/] Beleg ID: {easyVereinInvoiceId.Value} (Finalisiert)");
+                                evNode.AddNode($"[green]✔[/] Anhang: receipt_{referenceCode}.png");
+                                evNode.AddNode($"Zahlungskonto ID: {settings.ResolvedBankAccount}");
+                                evNode.AddNode($"Leistungsdatum: {transactionDate:yyyy-MM-dd}");
+
+                                AnsiConsole.Write(tree);
+                                Console.WriteLine();
                             }
                             else
                             {
                                 summaryList.Add((txId, txCode, "[yellow]Übersprungen[/]",
-                                    "Kein Beleg hochgeladen (fehlender Link/Fehler)", txAmountFormatted));
+                                    "Kein Beleg hochgeladen (Fehler beim Anlegen)", txAmountFormatted));
                             }
                         }
                         catch (Exception ex)
@@ -288,9 +401,18 @@ namespace TreasurerAutomation.Commands
             return 0;
         }
 
-        private static string BuildDescription(SumUp.Receipt receipt, string? cashierEmail)
+        private static string BuildDescription(SumUp.Receipt receipt, string? cashierEmail, decimal? feeAmount, int bankAccount)
         {
             var sb = new StringBuilder();
+
+            if (feeAmount.HasValue && decimal.TryParse(receipt.TransactionData?.Amount, CultureInfo.InvariantCulture, out var totalAmt))
+            {
+                var net = totalAmt - feeAmount.Value;
+                sb.AppendLine("[Transaktionsdetails]");
+                sb.AppendLine($"SumUp-Gebühr: {feeAmount.Value:N2} €");
+                sb.AppendLine($"Netto-Auszahlung: {net:N2} €");
+                sb.AppendLine();
+            }
 
             if (receipt.TransactionData?.Products != null && receipt.TransactionData.Products.Any())
             {
@@ -336,6 +458,7 @@ namespace TreasurerAutomation.Commands
                 sb.AppendLine($"Kassierer: {cashierEmail}");
             }
 
+            sb.AppendLine($"Zahlungskonto ID: {bankAccount}");
             sb.AppendLine();
 
             if (receipt.TransactionData?.VatRates != null && receipt.TransactionData.VatRates.Any())
@@ -375,88 +498,6 @@ namespace TreasurerAutomation.Commands
             }
 
             return await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        }
-
-        private static async Task<int> CreateEasyVereinInvoiceAsync(
-            string easyVereinToken,
-            decimal amount,
-            DateTime date,
-            string description,
-            string receiver,
-            string referenceCode,
-            CancellationToken cancellationToken)
-        {
-            var baseUri = new Uri("https://easyverein.com/api/");
-            using var httpClient = new HttpClient
-            {
-                BaseAddress = baseUri
-            };
-            httpClient.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", easyVereinToken);
-
-            var absAmount = Math.Abs(amount);
-            var payload = new
-            {
-                invNumber = referenceCode,
-                totalPrice = absAmount,
-                receiver = receiver,
-                date = date.ToString("yyyy-MM-dd"),
-                description = description,
-                isReceipt = true,
-                isDraft = true,
-                paymentInformation = "Überweisung",
-                kind = amount >= 0 ? "revenue" : "expense"
-            };
-
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            var response = await httpClient.PostAsync("v2.0/invoice", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Invoice creation returned {response.StatusCode}: {respText}");
-            }
-
-            var respJson = await response.Content.ReadAsStringAsync(cancellationToken);
-            using var doc = JsonDocument.Parse(respJson);
-            if (!doc.RootElement.TryGetProperty("id", out var idProp))
-            {
-                throw new Exception("easyVerein Invoice response did not contain an 'id' property.");
-            }
-
-            return idProp.GetInt32();
-        }
-
-        private static async Task UploadEasyVereinInvoiceFileAsync(
-            string easyVereinToken,
-            int invoiceId,
-            byte[] fileBytes,
-            string filename,
-            CancellationToken cancellationToken)
-        {
-            var baseUri = new Uri("https://easyverein.com/api/");
-            using var httpClient = new HttpClient
-            {
-                BaseAddress = baseUri
-            };
-            httpClient.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", easyVereinToken);
-
-            using var content = new MultipartFormDataContent();
-            var fileContent = new ByteArrayContent(fileBytes);
-            string contentType = filename.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
-                ? "application/pdf"
-                : "image/png";
-            fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-            content.Add(fileContent, "path", filename);
-
-            var response = await httpClient.PatchAsync($"v2.0/invoice/{invoiceId}", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Invoice file upload returned {response.StatusCode}: {respText}");
-            }
         }
     }
 }

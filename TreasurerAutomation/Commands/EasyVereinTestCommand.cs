@@ -11,25 +11,8 @@ using Spectre.Console.Cli;
 
 namespace TreasurerAutomation.Commands
 {
-    public class EasyVereinTestSettings : CommandSettings
+    public class EasyVereinTestSettings : GlobalSettings
     {
-        [CommandOption("--easyverein-token <VALUE>")]
-        [Description("Sets the easyVerein Token. Overrides EASYVEREIN_TOKEN env var.")]
-        public string? EasyVereinToken { get; set; }
-
-        public string ResolvedEasyVereinToken =>
-            EasyVereinToken ?? Environment.GetEnvironmentVariable("EASYVEREIN_TOKEN") ?? string.Empty;
-
-        public override ValidationResult Validate()
-        {
-            if (string.IsNullOrEmpty(ResolvedEasyVereinToken))
-            {
-                return ValidationResult.Error(
-                    "Missing configuration: --easyverein-token or EASYVEREIN_TOKEN env var is required.");
-            }
-
-            return ValidationResult.Success();
-        }
     }
 
     public class EasyVereinTestCommand : AsyncCommand<EasyVereinTestSettings>
@@ -42,6 +25,7 @@ namespace TreasurerAutomation.Commands
             Console.WriteLine();
 
             var token = settings.ResolvedEasyVereinToken;
+            using var easyVereinClient = new Services.EasyVereinClient(token);
 
             try
             {
@@ -84,20 +68,39 @@ namespace TreasurerAutomation.Commands
                     .StartAsync("Führe easyVerein API-Test durch...", async ctx =>
                     {
                         // 1. Beleg erstellen
-                        AnsiConsole.MarkupLine($" [blue]ℹ[/] Erstelle Beleg mit Code '{referenceCode}'...");
-                        invoiceId = await CreateEasyVereinInvoiceAsync(token, amount, date, description, receiver,
-                            referenceCode, cancellationToken);
+                        AnsiConsole.MarkupLine($" [blue]ℹ[/] Erstelle Beleg (Entwurf) mit Code '{referenceCode}'...");
+                        invoiceId = await easyVereinClient.CreateInvoiceAsync(
+                            amount: amount,
+                            date: date,
+                            description: description,
+                            receiver: receiver,
+                            referenceCode: referenceCode,
+                            paymentInformation: settings.ResolvedPaymentInfo,
+                            bankAccount: settings.ResolvedBankAccount,
+                            kind: "revenue",
+                            cancellationToken: cancellationToken
+                        );
                         AnsiConsole.MarkupLine($"   [green]✔[/] Beleg ID: {invoiceId}");
 
-                        // 2. Datei hochladen
+                        // 2. Position erstellen
+                        AnsiConsole.MarkupLine($" [blue]ℹ[/] Erstelle Position (InvoiceItem) in easyVerein...");
+                        await easyVereinClient.CreateInvoiceItemAsync(invoiceId, amount, cancellationToken: cancellationToken);
+                        AnsiConsole.MarkupLine("   [green]✔[/] Position erfolgreich erstellt.");
+
+                        // 3. Datei hochladen
                         AnsiConsole.MarkupLine($" [blue]ℹ[/] Lade Belegdatei hoch...");
-                        await UploadEasyVereinInvoiceFileAsync(token, invoiceId, fileBytes, filename, cancellationToken);
+                        await easyVereinClient.UploadInvoiceFileAsync(invoiceId, fileBytes, filename, cancellationToken);
                         AnsiConsole.MarkupLine("   [green]✔[/] Datei erfolgreich hochgeladen.");
+
+                        // 4. Finalisieren
+                        AnsiConsole.MarkupLine($" [blue]ℹ[/] Finalisiere Beleg...");
+                        await easyVereinClient.FinalizeInvoiceAsync(invoiceId, cancellationToken);
+                        AnsiConsole.MarkupLine("   [green]✔[/] Beleg erfolgreich finalisiert.");
                     });
 
                 Console.WriteLine();
                 AnsiConsole.MarkupLine(
-                    $"[green]✔ Erfolg:[/] Test erfolgreich abgeschlossen! Beleg mit Anhang '{filename}' wurde in easyVerein angelegt (ohne Buchungsverknüpfung).");
+                    $"[green]✔ Erfolg:[/] Test erfolgreich abgeschlossen! Beleg mit Anhang '{filename}' wurde in easyVerein angelegt (Finalisiert, ohne Buchungsverknüpfung).");
             }
             catch (Exception ex)
             {
@@ -107,80 +110,6 @@ namespace TreasurerAutomation.Commands
             }
 
             return 0;
-        }
-
-        private static async Task<int> CreateEasyVereinInvoiceAsync(
-            string easyVereinToken,
-            decimal amount,
-            DateTime date,
-            string description,
-            string receiver,
-            string referenceCode,
-            CancellationToken cancellationToken)
-        {
-            var baseUri = new Uri("https://easyverein.com/api/");
-            using var httpClient = new HttpClient { BaseAddress = baseUri };
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", easyVereinToken);
-
-            var absAmount = Math.Abs(amount);
-            var payload = new
-            {
-                invNumber = referenceCode,
-                totalPrice = absAmount,
-                receiver = receiver,
-                date = date.ToString("yyyy-MM-dd"),
-                description = description,
-                isReceipt = true,
-                isDraft = true,
-                paymentInformation = "Überweisung",
-                kind = amount >= 0 ? "revenue" : "expense"
-            };
-
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            var response = await httpClient.PostAsync("v2.0/invoice", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Invoice creation returned {response.StatusCode}: {respText}");
-            }
-
-            var respJson = await response.Content.ReadAsStringAsync(cancellationToken);
-            using var doc = JsonDocument.Parse(respJson);
-            if (!doc.RootElement.TryGetProperty("id", out var idProp))
-            {
-                throw new Exception("easyVerein Invoice response did not contain an 'id' property.");
-            }
-
-            return idProp.GetInt32();
-        }
-
-        private static async Task UploadEasyVereinInvoiceFileAsync(
-            string easyVereinToken,
-            int invoiceId,
-            byte[] fileBytes,
-            string filename,
-            CancellationToken cancellationToken)
-        {
-            var baseUri = new Uri("https://easyverein.com/api/");
-            using var httpClient = new HttpClient { BaseAddress = baseUri };
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", easyVereinToken);
-
-            using var content = new MultipartFormDataContent();
-            var fileContent = new ByteArrayContent(fileBytes);
-            string contentType = filename.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
-                ? "application/pdf"
-                : "image/png";
-            fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-            content.Add(fileContent, "path", filename);
-
-            var response = await httpClient.PatchAsync($"v2.0/invoice/{invoiceId}", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Invoice file upload returned {response.StatusCode}: {respText}");
-            }
         }
     }
 }
