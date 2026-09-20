@@ -93,3 +93,23 @@ Starte den Test (das easyVerein-Token kann per Parameter oder Umgebungsvariable 
 dotnet run -- easyverein-test --easyverein-token "DEIN_TOKEN"
 ```
 *Dieser Befehl erstellt automatisch ein temporäres Test-Zahlungskonto, lädt einen 1x1 Dummy-PNG-Beleg hoch und verknüpft diesen mit einer Test-Buchung.*
+
+---
+
+## Zuwendungsbestätigung (spendenquittung)
+
+Interaktiver Wizard, der eine Einzelbestätigung über Geldzuwendungen/Mitgliedsbeiträge nach `vorlagen/zuwendungsbestaetigung/vorlage.typ` ausfüllt und per `typst` als PDF erzeugt. Fragt Spender, Betrag (mit automatischer Zahlwort-Bestätigung, z.B. `eintausend Euro`), Daten, Verzicht, beide Unterschriften (Gesamtvertretung § 9 Abs. 2 Satzung) und Beleg-Nr. ab, validiert Pflichtfelder/Fristen und schreibt `spende-JJJJ-NNN-slug.typ` (+ `.pdf`) neben die Vorlage.
+
+```bash
+cd TreasurerAutomation
+dotnet run -- spendenquittung
+# Optionen: --vorlagen-dir <PFAD> --output-dir <PFAD> --skip-compile
+```
+
+### Tests
+
+```bash
+dotnet test
+```
+
+Das Testprojekt `TreasurerAutomation.Tests` (xUnit) prüft die Wizard-Logik ohne Interaktion: deutsche Zahlwörter (`GermanNumberToWords`), `.typ`-Erzeugung/Slug/Escaping (`SpendenquittungFileBuilder`) und Betrag-Parsing (`SpendenquittungCommand.ParseBetrag`, inkl. `1.000` vs. `1000.50`-Mehrdeutigkeit).

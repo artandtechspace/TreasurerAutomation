@@ -20,6 +20,8 @@ namespace TreasurerAutomation
                       .WithDescription("Synchronizes successful transactions and receipts from SumUp to easyVerein bookings.");
                 config.AddCommand<EasyVereinTestCommand>("easyverein-test")
                       .WithDescription("Tests the connection, document upload and booking association with easyVerein.");
+                config.AddCommand<SpendenquittungCommand>("spendenquittung")
+                      .WithDescription("Interaktiver Wizard für Zuwendungsbestätigungen (Typst-Vorlage ausfüllen + PDF erzeugen).");
             });
 
             return await app.RunAsync(args);
