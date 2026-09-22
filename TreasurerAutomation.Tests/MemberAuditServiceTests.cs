@@ -220,11 +220,30 @@ namespace TreasurerAutomation.Tests
             Assert.Contains(r.Findings, f => f.Code == "BEITRAG_EHRENMITGLIED");
         }
 
+        [Fact]
+        public void FreiwilligerZusatz_WirdAufgeschluesselt()
+        {
+            var r = MemberAuditService.Audit(KopieMit(Basis(), zusatz: 24m), Jahr, Heute);
+            Assert.Equal(84m, r.SollBeitrag);
+            Assert.Equal(60m, r.SollBasis);
+            Assert.True(r.Einzugsfaehig);
+        }
+
+        [Fact]
+        public void SummeFreiwillig_ZaehltNurEinzugsfaehige()
+        {
+            var ok = MemberAuditService.Audit(KopieMit(Basis(), zusatz: 24m), Jahr, Heute);
+            var blockiert = MemberAuditService.Audit(KopieMit(Basis(sepaJa: false), zusatz: 10m), Jahr, Heute);
+            Assert.False(blockiert.Einzugsfaehig);
+            var sum = MemberAuditService.Zusammenfassen(new[] { ok, blockiert }, Jahr);
+            Assert.Equal(24m, sum.SummeFreiwillig);
+        }
+
         private static MemberRecord KopieMit(MemberRecord b,
             string? mandatsref = "KEEP", DateTime? mandatsdatum = null, bool useMandatsdatum = false,
             DateTime? geburtstag = null, bool useGeburtstag = false,
             string? email = "KEEP", DateTime? austritt = null, bool useAustritt = false,
-            decimal saldo = 0m, bool ehrenmitglied = false)
+            decimal saldo = 0m, bool ehrenmitglied = false, decimal zusatz = 0m)
         {
             return new MemberRecord
             {
@@ -248,7 +267,7 @@ namespace TreasurerAutomation.Tests
                 GruppenKuerzel = new List<string>(b.GruppenKuerzel), GruppenNamen = new List<string>(b.GruppenNamen),
                 Ehrenmitglied = ehrenmitglied, Vorstand = b.Vorstand, IstFirma = b.IstFirma,
                 SepaEinverstaendnis = b.SepaEinverstaendnis, NachweisDatei = b.NachweisDatei,
-                Newsletter = b.Newsletter, FreiwilligerZusatz = b.FreiwilligerZusatz,
+                Newsletter = b.Newsletter, FreiwilligerZusatz = zusatz,
             };
         }
     }

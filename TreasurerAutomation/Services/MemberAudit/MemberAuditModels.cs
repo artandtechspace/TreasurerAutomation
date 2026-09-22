@@ -84,6 +84,8 @@ namespace TreasurerAutomation.Services.MemberAudit
         public MemberRecord Mitglied { get; init; } = null!;
         public List<MemberFinding> Findings { get; init; } = new();
         public decimal SollBeitrag { get; init; }
+        /// <summary>Soll ohne freiwilligen Zusatz (reine Beitragsklasse, ggf. 50%-Regel).</summary>
+        public decimal SollBasis { get; init; }
         public bool Einzugsfaehig { get; init; }
         public bool SepaEinziehbar { get; init; }
 
@@ -107,6 +109,7 @@ namespace TreasurerAutomation.Services.MemberAudit
         public int MitWarnung { get; init; }
         public decimal SummeSollEinzugsfaehig { get; init; }
         public decimal SummeSollSepa { get; init; }
+        public decimal SummeFreiwillig { get; init; }
         public decimal SummeSaldoOffen { get; init; }
         public decimal SummeSaeumnis { get; init; }
         public int MitForderung { get; init; }

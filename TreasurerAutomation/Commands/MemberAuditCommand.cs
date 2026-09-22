@@ -183,6 +183,8 @@ namespace TreasurerAutomation.Commands
                 Console.WriteLine();
                 AnsiConsole.MarkupLine($"[grey]Geprüft:[/] {summary.Geprueft}  [green]einzugsfähig:[/] {summary.Einzugsfaehig}  [green]SEPA:[/] {summary.SepaEinziehbar}  [red]mit Blocker:[/] {summary.MitBlocker}  [yellow]mit Warnung:[/] {summary.MitWarnung}");
                 AnsiConsole.MarkupLine($"[grey]Soll-Summe einzugsfähig:[/] {summary.SummeSollEinzugsfaehig:N2} €  [grey]davon SEPA:[/] {summary.SummeSollSepa:N2} €");
+                if (summary.SummeFreiwillig > 0)
+                    AnsiConsole.MarkupLine($"[grey]Darin freiwillige Zusätze (VBF):[/] {summary.SummeFreiwillig:N2} €");
                 if (summary.MitForderung > 0)
                     AnsiConsole.MarkupLine($"[grey]Offene Salden:[/] {summary.MitForderung} Mitglieder, Saldo {summary.SummeSaldoOffen:N2} € + Säumnis ca. {summary.SummeSaeumnis:N2} € (§5: 1 €/7 Tage, unverbindlich)");
                 AnsiConsole.MarkupLine("[grey]Regeln: Beitragsordnung §2/§3/§7 (01=24€, 02=80€, 02.1=30€, 03=60€, 04=100€, 50% nach 30.06.), Satzung §4/§5/§8, SEPA §7 Abs. 3. Nur GET, nichts geschrieben.[/]");
@@ -287,7 +289,12 @@ namespace TreasurerAutomation.Commands
             var tabelle = new Table().Border(TableBorder.Rounded);
             tabelle.AddColumn(new TableColumn("[grey]Feld[/]") { NoWrap = true });
             tabelle.AddColumn(new TableColumn("[bold]Wert[/]"));
-            tabelle.AddRow("Soll-Beitrag " + jahr, $"{r.SollBeitrag:N2} €  ({(r.SepaEinziehbar ? "SEPA-einziehbar" : r.Einzugsfaehig ? "einzugsfähig (kein SEPA)" : "blockiert")})");
+            var einzugKurz = r.SepaEinziehbar ? "SEPA-einziehbar" : r.Einzugsfaehig ? "einzugsfähig (kein SEPA)" : "blockiert";
+            tabelle.AddRow("Soll-Beitrag " + jahr, m.FreiwilligerZusatz > 0
+                ? $"{r.SollBeitrag:N2} €  ({r.SollBasis:N2} € Klasse + {m.FreiwilligerZusatz:N2} € freiwillig, {einzugKurz})"
+                : $"{r.SollBeitrag:N2} €  ({einzugKurz})");
+            if (m.FreiwilligerZusatz > 0)
+                tabelle.AddRow("Freiwilliger Zusatz", $"{m.FreiwilligerZusatz:N2} € / Jahr (Feld 'Freiwilliger Beitrag' / VBF)");
             tabelle.AddRow("Gruppen", Markup.Escape(m.GruppenKuerzel.Count == 0 ? "–" : string.Join(", ", m.GruppenKuerzel)));
             tabelle.AddRow("E-Mail", Markup.Escape(m.PrimaereEmail ?? "–"));
             tabelle.AddRow("Adresse", Markup.Escape($"{m.Strasse ?? "–"}, {m.Plz ?? "–"} {m.Stadt ?? "–"}"));
@@ -689,21 +696,78 @@ namespace TreasurerAutomation.Commands
                 var top = r.Findings
                     .OrderBy(f => f.Severity == FindingSeverity.Blocker ? 0 : f.Severity == FindingSeverity.Warnung ? 1 : 2)
                     .Take(2)
-                    .Select(f => $"{(f.Severity == FindingSeverity.Blocker ? "✘" : f.Severity == FindingSeverity.Warnung ? "⚠" : "ℹ")}\u00A0{f.Code}")
+                    .Select(f => $"{(f.Severity == FindingSeverity.Blocker ? "✘" : f.Severity == FindingSeverity.Warnung ? "⚠" : "ℹ")}\u00A0{KurzBefund(f, r)}")
                     .ToArray();
                 var befund = top.Length == 0 ? "[grey]ok[/]" : string.Join(", ", top);
                 if (r.Findings.Count > 2) befund += $" [grey]+{r.Findings.Count - 2}[/]";
+                var sollZelle = r.Mitglied.FreiwilligerZusatz > 0
+                    ? $"{r.SollBeitrag:N2} € (+{r.Mitglied.FreiwilligerZusatz:N2})"
+                    : $"{r.SollBeitrag:N2} €";
                 tabelle.AddRow(
                     Markup.Escape(nameRoh),
                     Markup.Escape(r.Mitglied.GruppenKuerzel.Count == 0 ? "–" : string.Join(",", r.Mitglied.GruppenKuerzel)),
-                    $"{r.SollBeitrag:N2} €",
+                    sollZelle,
                     status,
                     befund);
             }
             AnsiConsole.Write(tabelle);
             if (liste.Count > 200)
                 AnsiConsole.MarkupLine($"[grey]… {liste.Count - 200} weitere (per --format csv/json vollständig).[/]");
+            if (liste.Any(r => r.Findings.Count > 2))
+                AnsiConsole.MarkupLine("[grey]Befunde gekürzt (+n) – Details: --member <ID/Nummer> oder Klick-Auswahl bei Suche.[/]");
         }
+
+        /// <summary>
+        /// Kurztext für die Tabellen-Spalte: sagt in 2–4 Worten, was genau fehlt
+        /// (statt kryptischem Code). Langfassung steht in Finding.Nachricht
+        /// (Detailansicht --member, csv/json). Unbekannte Codes fallen auf den Code zurück.
+        /// </summary>
+        private static string KurzBefund(MemberFinding f, MemberAuditResult r) => f.Code switch
+        {
+            "STATUS_AUSGETRETEN" => "ausgetreten, kein Einzug",
+            "STAMM_NAME_FEHLT" => "Name fehlt",
+            "STAMM_ADRESSE_UNVOLLSTAENDIG" => "Adresse unvollständig",
+            "STAMM_PLZ_FORMAT" => "PLZ prüfen",
+            "STAMM_GEBURTSTAG_FEHLT" => "Geburtstag fehlt",
+            "STAMM_GEBURTSTAG_ZUKUNFT" => "Geburtstag ungültig",
+            "STAMM_EMAIL_FEHLT" => "E-Mail fehlt/ungültig",
+            "STAMM_LOGIN_EMAIL" => "Login-E-Mail fehlt",
+            "STATUS_EINTRITT_FEHLT" => "Eintrittsdatum fehlt",
+            "BEITRAG_KLASSE_FEHLT" => "Beitragsklasse fehlt",
+            "BEITRAG_MEHRERE_KLASSEN" => "mehrere Klassen",
+            "BEITRAG_FIRMA_KLASSE" => "Firma ohne VB04",
+            "BEITRAG_VB04_OHNE_FIRMA" => "VB04 ohne Firma",
+            "BEITRAG_INTERVALL" => "Intervall prüfen",
+            "BEITRAG_NEGATIV" => "Beitrag negativ",
+            "NACHWEIS_FEHLT" => "Nachweis fehlt",
+            "NACHWEIS_ALTER_VB01" => "VB01-Alter prüfen",
+            "BEITRAG_EHRENMITGLIED" => "Ehrenmitglied",
+            "SEPA_EINWILLIGUNG_FEHLT" => "SEPA-Einwilligung fehlt",
+            "SEPA_IBAN_FEHLT" => "IBAN fehlt/ungültig",
+            "SEPA_BIC_FEHLT_AUSLAND" => "BIC fehlt (Ausland)",
+            "SEPA_BIC_FEHLT" => "BIC fehlt",
+            "SEPA_BIC_FORMAT" => "BIC prüfen",
+            "SEPA_MANDATSREF_FEHLT" => "Mandatsref. fehlt",
+            "SEPA_MANDATSDATUM_FEHLT" => "Mandatsdatum fehlt",
+            "SEPA_MANDATSDATUM_ZUKUNFT" => "Mandatsdatum Zukunft",
+            "ZAHLART_KEIN_SEPA" => "kein SEPA-Einzug",
+            "SEPA_JA_OHNE_LASTSCHRIFT" => "SEPA-Ja ohne Lastschrift",
+            "ZAHLART_FEHLT" => "Zahlungsart fehlt",
+            "BANK_ABWEICHEND" => "abw. Kontoinhaber",
+            "STATUS_KUENDIGUNG_FORM" => "Kündigung prüfen",
+            "STATUS_GEKUENDIGT" => "gekündigt",
+            "MAHN_STREICHKANDIDAT" => $"Rückstand {r.Mitglied.Saldo:N2} €",
+            "MAHN_RUECKSTAND" => $"Rückstand {r.Mitglied.Saldo:N2} €",
+            "MAHN_VORSCHLAG" => $"Forderung {r.ForderungGesamt:N2} €",
+            "BEITRAG_LEISTUNGSBEGINN_FEHLT" => "Leistungsbeginn fehlt",
+            "STATUS_DATUM_REIHENFOLGE" => "Datumsfolge prüfen",
+            "API_DETAILS_UNVOLLSTAENDIG" => "API-Daten unvollständig",
+            "STAMM_EMAIL_DUPLIKAT" => "E-Mail doppelt",
+            "SEPA_MANDATSREF_DUPLIKAT" => "Mandatsref. doppelt",
+            "BANK_IBAN_GETEILT" => "IBAN geteilt",
+            "STAMM_DOPPEL_EINTRAG" => "Doppel-Eintrag?",
+            _ => f.Code,
+        };
 
         private static void ZeigeStatistik(MemberAuditSummary s)
         {
@@ -754,7 +818,7 @@ namespace TreasurerAutomation.Commands
         {
             var de = System.Globalization.CultureInfo.GetCultureInfo("de-DE");
             var sb = new StringBuilder();
-            sb.AppendLine("mitgliedsnummer;name;email;gruppen;soll_eur;saldo_eur;saeumnis_eur;forderung_eur;mahnvorschlag;einzugsfaehig;sepa_einziehbar;blocker;warnungen;codes");
+            sb.AppendLine("mitgliedsnummer;name;email;gruppen;soll_eur;freiwillig_eur;saldo_eur;saeumnis_eur;forderung_eur;mahnvorschlag;einzugsfaehig;sepa_einziehbar;blocker;warnungen;codes");
             foreach (var r in s.Ergebnisse)
             {
                 string Esc(string? v) => (v ?? "").Replace(";", ",").Replace("\n", " ").Replace("\r", "");
@@ -765,6 +829,7 @@ namespace TreasurerAutomation.Commands
                     Esc(r.Mitglied.PrimaereEmail),
                     Esc(string.Join(",", r.Mitglied.GruppenKuerzel)),
                     r.SollBeitrag.ToString("N2", de),
+                    r.Mitglied.FreiwilligerZusatz.ToString("N2", de),
                     r.Mitglied.Saldo.ToString("N2", de),
                     r.SaeumnisZuschlag.ToString("N2", de),
                     r.ForderungGesamt.ToString("N2", de),
@@ -790,6 +855,7 @@ namespace TreasurerAutomation.Commands
                 mitWarnung = s.MitWarnung,
                 summeSollEinzugsfaehig = s.SummeSollEinzugsfaehig,
                 summeSollSepa = s.SummeSollSepa,
+                summeFreiwillig = s.SummeFreiwillig,
                 summeSaldoOffen = s.SummeSaldoOffen,
                 summeSaeumnis = s.SummeSaeumnis,
                 mitForderung = s.MitForderung,
@@ -801,6 +867,8 @@ namespace TreasurerAutomation.Commands
                     email = r.Mitglied.PrimaereEmail,
                     gruppen = r.Mitglied.GruppenKuerzel,
                     sollBeitrag = r.SollBeitrag,
+                    sollBasis = r.SollBasis,
+                    freiwilligerZusatz = r.Mitglied.FreiwilligerZusatz,
                     saldo = r.Mitglied.Saldo,
                     saeumnisZuschlag = r.SaeumnisZuschlag,
                     forderungGesamt = r.ForderungGesamt,

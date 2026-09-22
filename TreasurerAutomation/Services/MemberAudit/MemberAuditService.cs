@@ -98,6 +98,7 @@ namespace TreasurerAutomation.Services.MemberAudit
 
             // ---------- 4. SEPA-Readiness (§7 Abs. 3) ----------
             var soll = Beitragsordnung.SollBeitrag(m.GruppenKuerzel, m.Eintrittsdatum, beitragsjahr, m.Ehrenmitglied, m.FreiwilligerZusatz);
+            var basis = Beitragsordnung.SollBeitrag(m.GruppenKuerzel, m.Eintrittsdatum, beitragsjahr, m.Ehrenmitglied);
             var sepaFaehig = true;
 
             if (m.Ehrenmitglied)
@@ -234,6 +235,7 @@ namespace TreasurerAutomation.Services.MemberAudit
                 Mitglied = m,
                 Findings = findings,
                 SollBeitrag = ausgetreten ? 0m : soll,
+                SollBasis = ausgetreten ? 0m : basis,
                 Einzugsfaehig = einzugsfaehig,
                 SepaEinziehbar = sepaEinziehbar,
                 TageVerzug = tageVerzug,
@@ -296,6 +298,7 @@ namespace TreasurerAutomation.Services.MemberAudit
                 MitWarnung = list.Count(r => r.WarnungCount > 0),
                 SummeSollEinzugsfaehig = list.Where(r => r.Einzugsfaehig).Sum(r => r.SollBeitrag),
                 SummeSollSepa = list.Where(r => r.SepaEinziehbar).Sum(r => r.SollBeitrag),
+                SummeFreiwillig = list.Where(r => r.Einzugsfaehig).Sum(r => r.Mitglied.FreiwilligerZusatz),
                 SummeSaldoOffen = list.Where(r => r.Mitglied.Saldo > 0).Sum(r => r.Mitglied.Saldo),
                 SummeSaeumnis = list.Sum(r => r.SaeumnisZuschlag),
                 MitForderung = list.Count(r => r.Mitglied.Saldo > 0),
