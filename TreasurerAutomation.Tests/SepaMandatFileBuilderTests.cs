@@ -5,6 +5,13 @@ namespace TreasurerAutomation.Tests
 {
     public sealed class SepaMandatFileBuilderTests
     {
+        private static SepaMandatDaten Muster(string zahler = "Max Mustermann") => new(
+            "ARTandTECH.space e.V.", "Lindenstraße 11", "48431 Rheine", "Deutschland",
+            "DE00ZZZ00000000000", "EV-1-2026", true,
+            zahler, "Musterstraße 12", "48431 Rheine", "Deutschland",
+            "BICCODE12", "DE75512108001245126199", "Rheine, 22.09.2026",
+            "Mitgliedsnummer 1");
+
         [Fact]
         public void DateiName_DatumVorne_SlugHinten()
         {
@@ -20,26 +27,22 @@ namespace TreasurerAutomation.Tests
         }
 
         [Fact]
-        public void Build_EnthaeltAlleFelderUndImport()
+        public void Build_EnthaeltAllePflichtfelderUndImport()
         {
-            var daten = new SepaMandatDaten(
-                "ARTandTECH.space e.V.", "Rheine", "DE00ZZZ00000000000", "EV-1-2026",
-                "Max Mustermann", "Musterstraße 12", "48431 Rheine",
-                "DE75512108001245126199", "BICCODE12", "Rheine, 22.09.2026", null);
-            var typ = SepaMandatFileBuilder.Build(daten);
+            var typ = SepaMandatFileBuilder.Build(Muster());
             Assert.Contains("#import \"vorlage.typ\": sepa_mandat", typ);
+            Assert.Contains("glaeubiger-id: \"DE00ZZZ00000000000\"", typ);
             Assert.Contains("mandatsreferenz: \"EV-1-2026\"", typ);
+            Assert.Contains("wiederkehrend: true,", typ);
             Assert.Contains("iban: \"DE75512108001245126199\"", typ);
+            Assert.Contains("kreditinstitut: \"BICCODE12\"", typ);
+            Assert.Contains("empfaenger-strasse: \"Lindenstraße 11\"", typ);
         }
 
         [Fact]
         public void Build_EscapedAnfuehrungszeichen()
         {
-            var daten = new SepaMandatDaten(
-                "Verein", "Rheine", "ID", "EV-1-2026",
-                "Max \"Maxi\" Mustermann", "Str. 1", "48431 Rheine",
-                "DE75512108001245126199", "", "Rheine, 22.09.2026", null);
-            var typ = SepaMandatFileBuilder.Build(daten);
+            var typ = SepaMandatFileBuilder.Build(Muster("Max \"Maxi\" Mustermann"));
             Assert.Contains("Max \\\"Maxi\\\" Mustermann", typ);
         }
     }

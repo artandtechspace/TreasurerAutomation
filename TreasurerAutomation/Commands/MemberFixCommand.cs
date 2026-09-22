@@ -104,7 +104,9 @@ namespace TreasurerAutomation.Commands
     {
         private const int MaxParallelMembers = 10;
         private const string DefaultVereinName = "ARTandTECH.space e.V.";
-        private const string DefaultVereinAdresse = "Rheine";
+        private const string DefaultVereinStrasse = "Lindenstraße 11";
+        private const string DefaultVereinPlzOrt = "48431 Rheine";
+        private const string DefaultVereinLand = "Deutschland";
         private const string DefaultGlaeubigerId = "DE00ZZZ00000000000";
 
         private sealed record PatchAuftrag(
@@ -509,11 +511,15 @@ namespace TreasurerAutomation.Commands
             {
                 var m = r.Mitglied;
                 var mandatRef = string.IsNullOrWhiteSpace(m.Mandatsreferenz) ? $"EV-{m.Id}-{jahr}" : m.Mandatsreferenz.Trim();
+                var plzOrt = $"{(m.Plz ?? "").Trim()} {(m.Stadt ?? "").Trim()}".Trim();
                 var daten = new SepaMandatDaten(
-                    DefaultVereinName, DefaultVereinAdresse, glaeubigerId, mandatRef,
-                    m.DisplayName, m.Strasse ?? "", $"{(m.Plz ?? "").Trim()} {(m.Stadt ?? "").Trim()}".Trim(),
-                    string.IsNullOrWhiteSpace(m.Iban) ? "___ wird nachgereicht ___" : FieldValidators.NormalisiereIban(m.Iban),
-                    m.Bic ?? "", $"Rheine, {heute:dd.MM.yyyy}",
+                    DefaultVereinName, DefaultVereinStrasse, DefaultVereinPlzOrt, DefaultVereinLand, glaeubigerId, mandatRef,
+                    Wiederkehrend: true,
+                    m.DisplayName, m.Strasse ?? "", plzOrt,
+                    string.IsNullOrWhiteSpace(m.Land) ? "Deutschland" : m.Land.Trim(),
+                    m.Bic ?? "",
+                    string.IsNullOrWhiteSpace(m.Iban) ? "__________________________" : FieldValidators.NormalisiereIban(m.Iban),
+                    $"Rheine, {heute:dd.MM.yyyy}",
                     m.MembershipNumber != null ? $"Mitgliedsnummer {m.MembershipNumber}" : null);
                 var basis = SepaMandatFileBuilder.DateiName(heute, m.DisplayName, m.MembershipNumber);
                 var typPfad = EindeutigerPfad(outputDir, basis, ".typ");

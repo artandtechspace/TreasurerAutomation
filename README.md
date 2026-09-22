@@ -151,7 +151,7 @@ Interaktiver Fix-Wizard auf Basis von `member-audit`. **Dry-Run ist Standard: oh
 
 - **Safe Auto-Fixes** (PATCH `contact-details`): `EMAIL_NORM` (Trim+lowercase), `MANDATSREF_NEU` (Vorschlag `EV-ID-Jahr`, nur bei Einwilligung+IBAN+Datum), `ZAHLART_LASTSCHRIFT` (nur wenn SEPA-Kern komplett).
 - **Nachgefragt statt erfunden:** IBAN (Mod97-geprüft, BIC bei Ausland Pflicht), Mandatsdatum (default heute). Einwilligung/Nachweis/Beitragsklasse werden nie gesetzt – nur als Anfrage geparkt.
-- **SEPA-Mandat:** `vorlagen/sepa-mandat/vorlage.typ` – erzeugt pro Mitglied mit SEPA-Blocker `JJJJMMTT_slug-nr_sepa-mandat.typ` (+ `.pdf` per `typst`). Ablauf: unterschreiben lassen → Referenz + Datum in easyVerein pflegen.
+- **SEPA-Mandat:** `vorlagen/sepa-mandat/vorlage.typ` strikt nach DK-Standardformular (DG VERLAG 440 160, SEPA-Basislastschrift / EPC SDD Core): Gläubigerblock + Gläubiger-ID, Mandatsreferenz, Ermächtigungstext + 8-Wochen-Hinweis im verbindlichen Wortlaut, Zahlungsart (wiederkehrend), Zahlerblock, Kreditinstitut + IBAN, Ort/Datum/Unterschrift. Erzeugt pro Mitglied mit SEPA-Blocker `JJJJMMTT_slug-nr_sepa-mandat.typ` (+ `.pdf` per `typst`). Ablauf: unterschreiben lassen → Ausfertigung für den Zahlungsempfänger verwahren → Referenz + Datum in easyVerein pflegen.
 - **Parken:** alles ohne Antwort landet in `fix-anfragen-JJJJ.csv` (+ Textbaustein). Antworten später mit `--member <ID> --apply` einpflegen.
 
 ```bash
