@@ -35,7 +35,7 @@ Die Konfiguration kann entweder über **Umgebungsvariablen** oder direkt als **C
 | :--- | :--- | :--- | :--- |
 | **SumUp Token** | `--sumup-token` | `SUMUP_ACCESS_TOKEN` | API-Zugriffsschlüssel für SumUp |
 | **SumUp Merchant Code** | `--merchant-code` | `SUMUP_MERCHANT_CODE` | Deine Händler-ID bei SumUp |
-| **easyVerein Token** | `--easyverein-token` | `EASYVEREIN_TOKEN` | API-Token (Bearer) für easyVerein |
+| **easyVerein Token** | `--easyverein-token` | `EASYVEREIN_TOKEN` | API-Token (Bearer) für easyVerein – alternativ `dotnet run -- login` (Session) |
 | **easyVerein Konto-ID** | `--billing-account` | `EASYVEREIN_BILLING_ACCOUNT_ID` | Interne ID des Kassen-/Bankkontos in easyVerein |
 
 ## Nutzung
@@ -113,3 +113,50 @@ dotnet test
 ```
 
 Das Testprojekt `TreasurerAutomation.Tests` (xUnit) prüft die Wizard-Logik ohne Interaktion: deutsche Zahlwörter (`GermanNumberToWords`), `.typ`-Erzeugung/Slug/Escaping (`SpendenquittungFileBuilder`) und Betrag-Parsing (`SpendenquittungCommand.ParseBetrag`, inkl. `1.000` vs. `1000.50`-Mehrdeutigkeit).
+
+### easyVerein Lese-Probe (ev-probe)
+
+Reine Lese-Probe (nur GET) gegen die easyVerein API – zeigt, welche Felder ein Endpunkt liefert. Vorbereitung für die Kassenprüfung.
+
+```bash
+cd TreasurerAutomation
+dotnet run -- ev-probe --endpoint booking --query "limit=5"
+dotnet run -- ev-probe --endpoint billing-account --query "limit=20"
+dotnet run -- ev-probe --endpoint invoice --query "limit=5"
+# Token per --easyverein-token oder EASYVEREIN_TOKEN
+```
+
+### Mitglieder-Audit (member-audit)
+
+Read-only Prüfung aller Mitglieder per easyVerein-API (`v2.0/member`, nur GET) für den Beitragseinzug: Zustimmungen (SEPA-Einwilligung), Unterlagen (Nachweis ermäßigt), Stammdaten, Beitragsklasse (01=24€, 02=80€, 02.1=30€, 03=60€, 04=100€, 50% nach 30.06., Ehrenmitglieder 0€), SEPA-Readiness (IBAN/BIC/Mandat), Status/Mahnwesen (Satzung §5).
+
+```bash
+cd TreasurerAutomation
+dotnet run -- member-audit --beitrag-jahr 2026 --format table
+dotnet run -- member-audit --format csv --output audit-2026.csv
+dotnet run -- member-audit --format json --output audit-2026.json --fail-on-blocker
+# Einzelprüfung + Suche:
+dotnet run -- member-audit --member 2        # ID oder Mitgliedsnummer
+dotnet run -- member-audit --search "luca"   # mehrere Treffer -> interaktive Auswahl für Detail
+# Hinweis: Komplettlauf dauert ~3 Min (API-Limit 100/min, Retry + Drosselung eingebaut).
+# Gruppen: VB01=24€, VB02=80€, VB2M=30€ (Familie Münsterlandkarte), VB03=60€, VB04=100€.
+# Token: --easyverein-token > EASYVEREIN_TOKEN > login-Session
+# Exit 2 bei --fail-on-blocker wenn Blocker gefunden (CI-fähig)
+```
+
+### Login / Session (get-token, refresh-token)
+
+Interaktiver Login statt Token kopieren. Username wird automatisch als `$orgShort_$email` gebaut (z.B. `ats_luca.schoeneberg@artandtech.space`):
+
+```bash
+cd TreasurerAutomation
+dotnet run -- login                          # fragt Username/Passwort, bei Bedarf 2FA
+dotnet run -- login -u luca.schoeneberg@artandtech.space --org-short ats
+dotnet run -- auth-status                    # Session prüfen
+dotnet run -- auth-status --refresh          # Token per GET refresh-token auffrischen (nur wenn fällig)
+dotnet run -- logout                         # Session löschen
+```
+
+* Token gilt 30 Tage, Refresh ab ~Tag 15 fällig (`tokenRefreshNeeded`-Header). `member-audit` erneuert Session-Token automatisch, sonst Hinweis.
+* Priorität: `--easyverein-token` > `EASYVEREIN_TOKEN` > Session-Datei (`~/.config/treasurer-automation/easyverein-session.json`, 0600).
+* Rate-Limit: 100/min (easyVerein). `member-audit` nutzt `limit` + `max-pages` + Server-Suche.

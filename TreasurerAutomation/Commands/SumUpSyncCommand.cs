@@ -47,7 +47,7 @@ namespace TreasurerAutomation.Commands
             MerchantCode ?? Environment.GetEnvironmentVariable("SUMUP_MERCHANT_CODE") ?? string.Empty;
 
         public string ResolvedEasyVereinToken =>
-            EasyVereinToken ?? Environment.GetEnvironmentVariable("EASYVEREIN_TOKEN") ?? string.Empty;
+            Services.EasyVereinTokenResolver.Resolve(EasyVereinToken);
 
         public int ResolvedBankAccount
         {
@@ -74,7 +74,7 @@ namespace TreasurerAutomation.Commands
                 missing.Add("SUMUP_MERCHANT_CODE / --merchant-code");
 
             if (string.IsNullOrEmpty(ResolvedEasyVereinToken))
-                missing.Add("EASYVEREIN_TOKEN / --easyverein-token");
+                missing.Add("easyVerein-Token (login, EASYVEREIN_TOKEN / --easyverein-token)");
 
             return missing.Count > 0
                 ? ValidationResult.Error("Missing or invalid configuration values: " + string.Join(", ", missing))

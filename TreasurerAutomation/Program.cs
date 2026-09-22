@@ -22,6 +22,16 @@ namespace TreasurerAutomation
                       .WithDescription("Tests the connection, document upload and booking association with easyVerein.");
                 config.AddCommand<SpendenquittungCommand>("spendenquittung")
                       .WithDescription("Interaktiver Wizard für Zuwendungsbestätigungen (Typst-Vorlage ausfüllen + PDF erzeugen).");
+                config.AddCommand<EasyVereinProbeCommand>("ev-probe")
+                      .WithDescription("Reine Lese-Probe der easyVerein API (Endpunkt-Felder anzeigen, Vorbereitung Kassenprüfung).");
+                config.AddCommand<MemberAuditCommand>("member-audit")
+                      .WithDescription("Prüft alle Mitglieder (Zustimmungen, Unterlagen, Stammdaten, SEPA-Readiness) read-only für den Beitragseinzug.");
+                config.AddCommand<LoginCommand>("login")
+                      .WithDescription("Interaktiver Login (Username/Passwort/2FA) via POST get-token, speichert Session für alle Befehle.");
+                config.AddCommand<LogoutCommand>("logout")
+                      .WithDescription("Löscht die gespeicherte easyVerein-Session.");
+                config.AddCommand<AuthStatusCommand>("auth-status")
+                      .WithDescription("Zeigt Login-Status, optional mit Token-Refresh (--refresh).");
             });
 
             return await app.RunAsync(args);
