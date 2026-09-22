@@ -37,6 +37,10 @@ namespace TreasurerAutomation.Commands
         [Description("Nur ein Mitglied (ID/Nummer).")]
         public string? Member { get; set; }
 
+        [CommandOption("--nur-probleme")]
+        [Description("Nur Mitglieder mit Blocker/Warnung bearbeiten.")]
+        public bool NurProbleme { get; set; }
+
         [CommandOption("--apply")]
         [Description("Schreibt wirklich in easyVerein (PATCH). Ohne --apply: Dry-Run, nichts wird geschrieben.")]
         public bool Apply { get; set; }
@@ -128,7 +132,10 @@ namespace TreasurerAutomation.Commands
             {
                 using var client = new EasyVereinClient(settings.ResolvedToken);
 
-                var (results, kontaktIds) = await LadeAuditAsync(client, settings, jahr, heute, cancellationToken);
+                var (resultsAlle, kontaktIds) = await LadeAuditAsync(client, settings, jahr, heute, cancellationToken);
+                var results = settings.NurProbleme
+                    ? resultsAlle.Where(r => r.Findings.Any(f => f.Severity != FindingSeverity.Info)).ToList()
+                    : resultsAlle;
                 if (results.Count == 0)
                 {
                     AnsiConsole.MarkupLine("[yellow]Keine Mitglieder gefunden.[/]");
@@ -272,11 +279,20 @@ namespace TreasurerAutomation.Commands
                         });
                 });
 
-            var list = records.Where(r => r != null).ToList();
-            MemberAuditCommand.ErgänzeTechnikFindings(
-                list.Select(r => (Json: default(JsonElement), Record: r.Mitglied)).ToList(), list);
+            var list = new List<MemberAuditResult>();
+            var paare = new List<(JsonElement Json, MemberRecord Record)>();
+            for (var i = 0; i < members.Count; i++)
+            {
+                if (records[i] is null) continue;
+                list.Add(records[i]);
+                paare.Add((members[i], records[i].Mitglied));
+            }
+            var technischUnvollstaendig = MemberAuditCommand.ErgänzeTechnikFindings(paare, list);
             MemberAuditCommand.ErgänzeDuplikatFindings(list);
             AnsiConsole.MarkupLine($"[grey]Mitglieder:[/] {list.Count}  [red]mit Blocker:[/] {list.Count(r => r.BlockerCount > 0)}");
+            if (technischUnvollstaendig > 0)
+                AnsiConsole.MarkupLine($"[yellow]⚠ Bei {technischUnvollstaendig} Mitglied(ern) konnten Kontakt-/Gruppendaten nicht geladen werden (Rate-Limit). " +
+                    $"Befunde dort ggf. unvollständig – Lauf wiederholen.[/]");
             return (list, kontaktIds);
         }
 
