@@ -70,6 +70,38 @@ namespace TreasurerAutomation.Services.MemberAudit
             return BicRegex.IsMatch(bic.Trim());
         }
 
+        /// <summary>
+        /// Gläubiger-Identifikationsnummer nach ISO 13616 (wie IBAN: Mod 97 == 1).
+        /// Leerzeichen werden ignoriert. DE-IDs sind 18-stellig (DE + 2 Prüfziffern
+        /// + 3-stelliger Geschäftsbereichscode + 11-stellige nationale Kennung).
+        /// Eine falsche ID führt zur Ablehnung aller Lastschriften – daher hart prüfen.
+        /// </summary>
+        public static bool IstGueltigeGlaeubigerId(string? id)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return false;
+            var s = new string(id.Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
+            if (s.Length is < 8 or > 35) return false;
+            if (!char.IsLetter(s[0]) || !char.IsLetter(s[1])) return false;
+            if (!char.IsDigit(s[2]) || !char.IsDigit(s[3])) return false;
+            return Mod97Eins(s);
+        }
+
+        /// <summary>ISO-13616-Prüfziffer (Stellen 5+ nach vorne, Buchstaben A=10..Z=35).</summary>
+        internal static bool Mod97Eins(string s)
+        {
+            var umgestellt = s.Substring(4) + s.Substring(0, 4);
+            var rest = 0;
+            foreach (var c in umgestellt)
+            {
+                var wert = char.IsDigit(c) ? c - '0' : c - 'A' + 10;
+                if (char.IsDigit(c))
+                    rest = (rest * 10 + wert) % 97;
+                else
+                    rest = (rest * 100 + wert) % 97;
+            }
+            return rest == 1;
+        }
+
         /// <summary>IBAN-Normalform für Vergleiche/Anzeige (nur Zeichen, groß).</summary>
         public static string NormalisiereIban(string? iban) =>
             string.IsNullOrWhiteSpace(iban)

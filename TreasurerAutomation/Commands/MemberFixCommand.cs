@@ -503,8 +503,12 @@ namespace TreasurerAutomation.Commands
                 : Path.GetFullPath(settings.OutputDir);
             Directory.CreateDirectory(outputDir);
             var glaeubigerId = string.IsNullOrWhiteSpace(settings.GlaeubigerId) ? DefaultGlaeubigerId : settings.GlaeubigerId.Trim();
-            if (glaeubigerId == DefaultGlaeubigerId)
-                AnsiConsole.MarkupLine("[yellow]⚠[/] Keine --glaeubiger-id angegeben – Platzhalter wird eingesetzt, bitte vor Versand ersetzen.");
+            if (!FieldValidators.IstGueltigeGlaeubigerId(glaeubigerId))
+            {
+                AnsiConsole.MarkupLine($"[red]✘ Fehler:[/] Gläubiger-ID '{Markup.Escape(glaeubigerId)}' ist ungültig (ISO 13616 Prüfziffer). " +
+                    $"Keine Mandate erzeugt – echte ID per --glaeubiger-id übergeben (Bundesbank-Schreiben prüfen).");
+                return;
+            }
 
             var erzeugt = 0;
             foreach (var r in kandidaten)

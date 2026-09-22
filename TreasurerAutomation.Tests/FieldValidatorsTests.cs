@@ -50,5 +50,18 @@ namespace TreasurerAutomation.Tests
         {
             Assert.Equal(erwartet, FieldValidators.IstGueltigeDePlz(plz));
         }
+
+        [Theory]
+        // DE65… ist eine synthetische Fixture (gleicher Rumpf, korrekte Prüfziffern) – keine Echtdaten
+        [InlineData("DE65 ZZZ 0000 2513 771", true)]
+        [InlineData("DE89 ZZZ 0000 2513 771", false)]  // falsche Prüfziffern (mod97=25)
+        [InlineData("DE00ZZZ00000000000", false)]      // Platzhalter
+        [InlineData("", false)]
+        [InlineData(null, false)]
+        [InlineData("DE65", false)]
+        public void GlaeubigerId(string? id, bool erwartet)
+        {
+            Assert.Equal(erwartet, FieldValidators.IstGueltigeGlaeubigerId(id));
+        }
     }
 }

@@ -163,7 +163,7 @@ $RECYCLE.BIN/
 vorlagen/**/*.pdf
 
 # member-fix: generierte Mandate + Anfragen enthalten echte Personendaten (Namen, IBAN, E-Mail)
-vorlagen/sepa-mandat/*_sepa-mandat.typ
+vorlagen/sepa-mandat/*_sepa-mandat*.typ
 fix-anfragen-*.csv
 TreasurerAutomation/fix-anfragen-*.csv
 
