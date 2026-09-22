@@ -34,27 +34,30 @@
   set page(paper: "a4", margin: 2cm)
   set text(lang: "de", size: 11pt)
 
-  align(center, text(size: 16pt, weight: "bold")[SEPA-Lastschriftmandat])
-  align(center, text(size: 10pt)[für wiederkehrende Zahlungen (Mitgliedsbeiträge)])
+  align(center)[
+    #text(size: 16pt, weight: "bold")[SEPA-Lastschriftmandat]
+    \ #text(size: 10pt)[für wiederkehrende Zahlungen (Mitgliedsbeiträge)]
+  ]
   v(0.6cm)
 
   text(weight: "bold")[Zahlungsempfänger]
-  linebreak()
-  [#empfaenger-name] \
-  [#empfaenger-adresse] \
-  Gläubiger-Identifikationsnummer: [#glaeubiger-id] \
-  Mandatsreferenz: [#mandatsreferenz]
+  [
+    #empfaenger-name \
+    #empfaenger-adresse \
+    Gläubiger-Identifikationsnummer: #glaeubiger-id \
+    Mandatsreferenz: #mandatsreferenz
+  ]
   v(0.4cm)
 
   text(weight: "bold")[Zahler / Kontoinhaber]
-  linebreak()
-  [#zahler-name] \
-  [#zahler-strasse] \
-  [#zahler-plz-ort] \
-  IBAN: [#iban] \
-  #if bic != "" [BIC: [#bic] \]
-
+  [
+    #zahler-name \
+    #zahler-strasse \
+    #zahler-plz-ort \
+    IBAN: #iban#if bic != "" [ \ BIC: #bic]
+  ]
   v(0.4cm)
+
   [Ich ermächtige den oben genannten Zahlungsempfänger, Zahlungen (Mitgliedsbeiträge)
   von meinem Konto mittels Lastschrift einzuziehen. Zugleich weise ich mein
   Kreditinstitut an, die vom Zahlungsempfänger auf mein Konto gezogenen Lastschriften
@@ -63,16 +66,18 @@
   [Hinweis: Ich kann innerhalb von acht Wochen, beginnend mit dem Belastungsdatum,
   die Erstattung des belasteten Betrages verlangen. Es gelten dabei die mit meinem
   Kreditinstitut vereinbarten Bedingungen.]
-  #if hinweis != "" {
+  if hinweis != "" {
     v(0.3cm)
     text(weight: "bold")[Hinweis: ]
     [#hinweis]
   }
 
   v(1.2cm)
-  [#ort-datum]
-  h(1fr)
-  [Unterschrift Zahler / Kontoinhaber]
+  [
+    #ort-datum
+    #h(1fr)
+    Unterschrift Zahler / Kontoinhaber
+  ]
   v(0.2cm)
   line(length: 100%)
 }

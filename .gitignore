@@ -162,5 +162,10 @@ $RECYCLE.BIN/
 # TreasurerAutomation: erzeugte Zuwendungsbestätigungen / Belege (Typst-Artefakte)
 vorlagen/**/*.pdf
 
+# member-fix: generierte Mandate + Anfragen enthalten echte Personendaten (Namen, IBAN, E-Mail)
+vorlagen/sepa-mandat/*_sepa-mandat.typ
+fix-anfragen-*.csv
+TreasurerAutomation/fix-anfragen-*.csv
+
 # .NET Test-Artefakte
 TestResults/

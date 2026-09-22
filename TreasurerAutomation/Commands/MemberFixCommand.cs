@@ -526,14 +526,14 @@ namespace TreasurerAutomation.Commands
                 {
                     var (gefunden, ok, ausgabe) = await KompiliereAsync(typPfad, pdfPfad, ct);
                     if (!gefunden)
-                        AnsiConsole.MarkupLine($"[grey]typst nicht im PATH – nur .typ (manuell: typst compile \"{typPfad}\")[/]");
+                        AnsiConsole.MarkupLine($"[grey]typst nicht im PATH – nur .typ (manuell: typst compile \"{Markup.Escape(typPfad)}\")[/]");
                     else if (!ok)
                         AnsiConsole.MarkupLine($"[red]✘ typst:[/] {Markup.Escape(ausgabe.Trim())}");
                     else
                         AnsiConsole.MarkupLine($"[green]✔[/] PDF: {Markup.Escape(pdfPfad)}");
                 }
             }
-            AnsiConsole.MarkupLine($"[grey]{erzeugt} Mandat(e) in {outputDir}. Ablauf: unterschreiben lassen → Mandatsreferenz + Mandatsdatum in easyVerein pflegen.[/]");
+            AnsiConsole.MarkupLine($"[grey]{erzeugt} Mandat(e) in {Markup.Escape(outputDir)}. Ablauf: unterschreiben lassen → Mandatsreferenz + Mandatsdatum in easyVerein pflegen.[/]");
         }
 
         private static string EindeutigerPfad(string dir, string basis, string endung)
@@ -608,7 +608,7 @@ namespace TreasurerAutomation.Commands
             File.WriteAllText(pfad, sb.ToString());
             AnsiConsole.MarkupLine($"[yellow]◷ {anfragen.Count} Anfrage(n) geparkt:[/] {Markup.Escape(pfad)}");
             Console.WriteLine();
-            AnsiConsole.MarkupLine("[grey]Textbaustein z.B.: Hallo X, für den Lastschrift-Einzug fehlt uns [IBAN / unterschriebenes SEPA-Mandat / Nachweis]. Danke![/]");
+            AnsiConsole.MarkupLine("[grey]Textbaustein z.B.: Hallo X, für den Lastschrift-Einzug fehlt uns noch IBAN / unterschriebenes SEPA-Mandat / Nachweis. Danke![/]");
         }
 
         private static async Task<(int Ok, int Fehler)> SchreibePatchesAsync(
