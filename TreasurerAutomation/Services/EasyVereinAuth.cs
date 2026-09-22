@@ -18,8 +18,8 @@ namespace TreasurerAutomation.Services
             int Id() => el.TryGetProperty("id", out var p) && p.TryGetInt32(out var i) ? i : 0;
             string Email() => el.TryGetProperty("email", out var p) ? p.GetString() ?? "" : "";
             bool Needs2FA() =>
-                el.TryGetProperty("needs2FA", out var p) && p.ValueKind == JsonValueKind.True ||
-                el.TryGetProperty("needs2fa", out var p2) && p2.ValueKind == JsonValueKind.True;
+                (el.TryGetProperty("needs2FA", out var p) && p.ValueKind == JsonValueKind.True) ||
+                (el.TryGetProperty("needs2fa", out var p2) && p2.ValueKind == JsonValueKind.True);
             int Expires() => el.TryGetProperty("expiresIn", out var p) && p.TryGetInt32(out var i) ? i : 0;
             string Token() => el.TryGetProperty("token", out var p) ? p.GetString() ?? "" : "";
             var t = Token();
@@ -27,6 +27,13 @@ namespace TreasurerAutomation.Services
                 throw new Exception("get-token Antwort enthält keinen 'token'.");
             return new EasyVereinTokenResponse(Id(), Email(), Needs2FA(), Expires(), t);
         }
+    }
+
+    /// <summary>API-Fehler mit Statuscode (u.a. für 2FA-Erkennung beim Login).</summary>
+    public sealed class EasyVereinApiException : Exception
+    {
+        public int StatusCode { get; }
+        public EasyVereinApiException(int statusCode, string message) : base(message) => StatusCode = statusCode;
     }
 
     /// <summary>
@@ -42,6 +49,8 @@ namespace TreasurerAutomation.Services
         DateTime CreatedAtUtc,
         DateTime ExpiresAtUtc)
     {
+        /// <summary>Fallback-Lebensdauer, wenn die API kein expiresIn liefert (30 Tage).</summary>
+        public const int DefaultLifetimeDays = 30;
         public bool IsExpired(DateTime? now = null) =>
             (now ?? DateTime.UtcNow) >= ExpiresAtUtc.AddMinutes(-5);
 
@@ -111,7 +120,7 @@ namespace TreasurerAutomation.Services
         public static EasyVereinSession FromTokenResponse(EasyVereinTokenResponse resp, DateTime? now = null)
         {
             var t = now ?? DateTime.UtcNow;
-            var expires = resp.ExpiresIn > 0 ? t.AddSeconds(resp.ExpiresIn) : t.AddDays(30);
+            var expires = resp.ExpiresIn > 0 ? t.AddSeconds(resp.ExpiresIn) : t.AddDays(DefaultLifetimeDays);
             return new EasyVereinSession(resp.Token, resp.Email, resp.Id, t, expires);
         }
     }
@@ -129,9 +138,11 @@ namespace TreasurerAutomation.Services
             var user = (eingabe ?? "").Trim();
             if (string.IsNullOrWhiteSpace(user))
                 throw new ArgumentException("Username/E-Mail darf nicht leer sein.", nameof(eingabe));
-            if (user.Contains('_'))
-                return user; // bereits in Form orgShort_rest
             var org = (orgShort ?? DefaultOrgShort).Trim().TrimEnd('_');
+            // Nur unverändert lassen, wenn DAS Org-Prefix bereits dransteht –
+            // ein beliebiger Unterstrich (z.B. max_muster@mail.de) genügt nicht.
+            if (!string.IsNullOrWhiteSpace(org) && user.StartsWith(org + "_", StringComparison.OrdinalIgnoreCase))
+                return user;
             if (string.IsNullOrWhiteSpace(org)) return user;
             return $"{org}_{user}";
         }
@@ -142,26 +153,26 @@ namespace TreasurerAutomation.Services
     /// </summary>
     public static class EasyVereinTokenResolver
     {
-        public static string Resolve(string? explicitToken)
-        {
-            if (!string.IsNullOrWhiteSpace(explicitToken)) return explicitToken.Trim();
-            var env = Environment.GetEnvironmentVariable("EASYVEREIN_TOKEN");
-            if (!string.IsNullOrWhiteSpace(env)) return env.Trim();
-            var session = EasyVereinSession.Load();
-            if (session != null && !string.IsNullOrWhiteSpace(session.Token) && !session.IsExpired())
-                return session.Token;
-            return string.Empty;
-        }
+        public static string Resolve(string? explicitToken) => ResolveMitQuelle(explicitToken).Token;
 
         public static string DescribeSource(string? explicitToken)
         {
-            if (!string.IsNullOrWhiteSpace(explicitToken)) return "--easyverein-token";
+            var (token, quelle, session) = ResolveMitQuelle(explicitToken);
+            if (string.IsNullOrWhiteSpace(token)) return "keine";
+            if (quelle == "Session" && session != null)
+                return $"Session ({session.Email}, gültig bis {session.ExpiresAtUtc:dd.MM.yyyy})";
+            return quelle;
+        }
+
+        private static (string Token, string Quelle, EasyVereinSession? Session) ResolveMitQuelle(string? explicitToken)
+        {
+            if (!string.IsNullOrWhiteSpace(explicitToken)) return (explicitToken.Trim(), "--easyverein-token", null);
             var env = Environment.GetEnvironmentVariable("EASYVEREIN_TOKEN");
-            if (!string.IsNullOrWhiteSpace(env)) return "EASYVEREIN_TOKEN";
+            if (!string.IsNullOrWhiteSpace(env)) return (env.Trim(), "EASYVEREIN_TOKEN", null);
             var session = EasyVereinSession.Load();
             if (session != null && !string.IsNullOrWhiteSpace(session.Token) && !session.IsExpired())
-                return $"Session ({session.Email}, gültig bis {session.ExpiresAtUtc:dd.MM.yyyy})";
-            return "keine";
+                return (session.Token, "Session", session);
+            return (string.Empty, "keine", null);
         }
     }
 }

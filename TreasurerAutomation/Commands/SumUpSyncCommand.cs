@@ -40,6 +40,9 @@ namespace TreasurerAutomation.Commands
         [Description("Sets the easyVerein payment information. Overrides EASYVEREIN_PAYMENT_INFO env var. Defaults to 'Überweisung'.")]
         public string? PaymentInfo { get; set; }
 
+        private const int DefaultBankAccountId = 200571;
+        private const string DefaultPaymentInfo = "Überweisung";
+
         public string ResolvedSumupToken =>
             SumupToken ?? Environment.GetEnvironmentVariable("SUMUP_ACCESS_TOKEN") ?? string.Empty;
 
@@ -56,12 +59,12 @@ namespace TreasurerAutomation.Commands
                 if (BankAccount.HasValue) return BankAccount.Value;
                 var envVal = Environment.GetEnvironmentVariable("EASYVEREIN_BANK_ACCOUNT");
                 if (int.TryParse(envVal, out var val)) return val;
-                return 200571;
+                return DefaultBankAccountId;
             }
         }
 
         public string ResolvedPaymentInfo =>
-            PaymentInfo ?? Environment.GetEnvironmentVariable("EASYVEREIN_PAYMENT_INFO") ?? "Überweisung";
+            PaymentInfo ?? Environment.GetEnvironmentVariable("EASYVEREIN_PAYMENT_INFO") ?? DefaultPaymentInfo;
 
         public override ValidationResult Validate()
         {
@@ -96,6 +99,15 @@ namespace TreasurerAutomation.Commands
         [Description("Maximum number of transactions to fetch from SumUp. Default is 100.")]
         [DefaultValue(100)]
         public int Limit { get; set; }
+
+        public override ValidationResult Validate()
+        {
+            var basis = base.Validate();
+            if (!basis.Successful) return basis;
+            if (Days < 1) return ValidationResult.Error("--days muss >= 1 sein.");
+            if (Limit is < 1 or > 1000) return ValidationResult.Error("--limit muss 1..1000 sein.");
+            return ValidationResult.Success();
+        }
     }
 
     /// <summary>
@@ -103,11 +115,13 @@ namespace TreasurerAutomation.Commands
     /// </summary>
     public class SumUpSyncCommand : AsyncCommand<SumUpSyncSettings>
     {
+        private const string SumUpReceiptUserAgent =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36";
+
         protected override async Task<int> ExecuteAsync(CommandContext context, SumUpSyncSettings settings,
             CancellationToken cancellationToken)
         {
-            AnsiConsole.Write(new Rule("[yellow]SumUp to easyVerein Sync[/]").RuleStyle("grey").LeftJustified());
-            Console.WriteLine();
+            ConsoleHelper.PrintHeader("SumUp to easyVerein Sync");
 
             var sumUpOptions = new SumUp.SumUpClientOptions { AccessToken = settings.ResolvedSumupToken };
             var sumUpClient = new SumUp.SumUpClient(sumUpOptions);
@@ -125,7 +139,7 @@ namespace TreasurerAutomation.Commands
             await AnsiConsole.Status()
                 .Spinner(Spinner.Known.Dots)
                 .SpinnerStyle(Style.Parse("yellow bold"))
-                .StartAsync("Abrufen der Transaktionsliste von SumUp...", async ctx =>
+                .StartAsync("Abrufen der Transaktionsliste von SumUp...", async _ =>
                 {
                     var listApiResponse =
                         await sumUpClient.Transactions.ListAsync(settings.ResolvedMerchantCode, listOptions);
@@ -179,7 +193,7 @@ namespace TreasurerAutomation.Commands
                 await AnsiConsole.Status()
                     .Spinner(Spinner.Known.Dots)
                     .SpinnerStyle(Style.Parse("blue bold"))
-                    .StartAsync($"Verarbeite Transaktion {txCode}...", async ctx =>
+                    .StartAsync($"Verarbeite Transaktion {txCode}...", async _ =>
                     {
                         try
                         {
@@ -233,14 +247,7 @@ namespace TreasurerAutomation.Commands
                                         netAmount = parsedAmount - feeAmount.Value;
                                     }
 
-                                    var pngLink = txFull.Links?.FirstOrDefault(l =>
-                                        l.Type != null && l.Type.Contains("png", StringComparison.OrdinalIgnoreCase));
-
-                                    if (pngLink == null && txFull.Links != null)
-                                    {
-                                        pngLink = txFull.Links.FirstOrDefault(l =>
-                                            l.Href != null && l.Href.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
-                                    }
+                                    var pngLink = FindeBelegBildLink(txFull.Links);
 
                                     if (pngLink != null)
                                     {
@@ -401,6 +408,15 @@ namespace TreasurerAutomation.Commands
             return 0;
         }
 
+        private static SumUp.Link? FindeBelegBildLink(IEnumerable<SumUp.Link>? links)
+        {
+            if (links == null) return null;
+            return links.FirstOrDefault(l =>
+                    l.Type != null && l.Type.Contains("png", StringComparison.OrdinalIgnoreCase))
+                ?? links.FirstOrDefault(l =>
+                    l.Href != null && l.Href.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
+        }
+
         private static string BuildDescription(SumUp.Receipt receipt, string? cashierEmail, decimal? feeAmount, int bankAccount)
         {
             var sb = new StringBuilder();
@@ -485,8 +501,7 @@ namespace TreasurerAutomation.Commands
             CancellationToken cancellationToken)
         {
             using var httpClient = new HttpClient();
-            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36");
+            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(SumUpReceiptUserAgent);
             httpClient.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Bearer", token);
 

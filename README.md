@@ -138,7 +138,7 @@ dotnet run -- member-audit --format json --output audit-2026.json --fail-on-bloc
 # Einzelprüfung + Suche:
 dotnet run -- member-audit --member 2        # ID oder Mitgliedsnummer
 dotnet run -- member-audit --search "luca"   # mehrere Treffer -> interaktive Auswahl für Detail
-# Hinweis: Komplettlauf dauert ~3 Min (API-Limit 100/min, Retry + Drosselung eingebaut).
+# Hinweis: Details laden parallel (10x, je 3 Requests) mit 90/min-Limiter + Timing-Zeile; ~300 Requests brauchen mind. ~3 Min (API-Limit 100/min).
 # Gruppen: VB01=24€, VB02=80€, VB2M=30€ (Familie Münsterlandkarte), VB03=60€, VB04=100€.
 # Freiwilliger Zusatz (Feld 'Freiwilliger Beitrag'/VBF) steckt im Soll: Tabelle zeigt z.B. "84,00 € (+24,00)", CSV/JSON als eigene Spalte.
 # Token: --easyverein-token > EASYVEREIN_TOKEN > login-Session

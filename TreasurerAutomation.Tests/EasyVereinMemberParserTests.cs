@@ -85,5 +85,19 @@ namespace TreasurerAutomation.Tests
             Assert.Null(rec.PrimaereEmail);
             Assert.Null(rec.SepaEinverstaendnis);
         }
+
+        [Theory]
+        [InlineData("n/a")]
+        [InlineData("N/A")]
+        [InlineData("N/a")]
+        [InlineData("-")]
+        [InlineData("–")]
+        [InlineData("keine Angabe")]
+        [InlineData("   ")]
+        public void GetDate_IgnoriertLeerwerte(string leer)
+        {
+            var el = Json($"{{\"joinDate\": \"{leer}\"}}");
+            Assert.Null(EasyVereinMemberParser.GetDate(el, "joinDate"));
+        }
     }
 }

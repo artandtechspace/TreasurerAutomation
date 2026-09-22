@@ -1,4 +1,3 @@
-using System.Numerics;
 using System.Text.RegularExpressions;
 
 namespace TreasurerAutomation.Services.MemberAudit
@@ -10,6 +9,10 @@ namespace TreasurerAutomation.Services.MemberAudit
     {
         private static readonly Regex EmailRegex =
             new(@"^[^@\s]+@[^@\s]+\.[^@\s]+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex PlzRegex =
+            new(@"^\d{5}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex BicRegex =
+            new(@"^[A-Za-z]{6}[A-Za-z0-9]{2}([A-Za-z0-9]{3})?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         public static bool IstGueltigeEmail(string? mail)
         {
@@ -22,7 +25,7 @@ namespace TreasurerAutomation.Services.MemberAudit
         public static bool IstGueltigeDePlz(string? plz)
         {
             if (string.IsNullOrWhiteSpace(plz)) return false;
-            return Regex.IsMatch(plz.Trim(), @"^\d{5}$");
+            return PlzRegex.IsMatch(plz.Trim());
         }
 
         /// <summary>
@@ -48,25 +51,29 @@ namespace TreasurerAutomation.Services.MemberAudit
             return rest == 1;
         }
 
-        public static bool IstAuslandsIban(string? iban, string? land = null)
+        /// <summary>
+        /// Inland = DE-IBAN, alles andere = Ausland (BIC-pflichtig).
+        /// Bewusst nur Präfix-Heuristik: Für den SEPA-Einzug zählt das IBAN-Land,
+        /// nicht die Wohnadresse (z.B. DE-IBAN eines Franzosen braucht keine BIC).
+        /// </summary>
+        public static bool IstAuslandsIban(string? iban)
         {
             if (string.IsNullOrWhiteSpace(iban)) return false;
             var s = iban.Trim().ToUpperInvariant();
             if (s.Length < 2) return false;
-            // DE-IBAN gilt als Inland; alles andere als Ausland (vereinfachte Heuristik für BIC-Pflicht)
-            if (s.StartsWith("DE")) return false;
-            if (!string.IsNullOrWhiteSpace(land))
-            {
-                var l = land.Trim().ToLowerInvariant();
-                if (l is "deutschland" or "de" or "germany") return s.StartsWith("DE") ? false : false;
-            }
-            return true;
+            return !s.StartsWith("DE", StringComparison.Ordinal);
         }
 
         public static bool IstGueltigeBic(string? bic)
         {
             if (string.IsNullOrWhiteSpace(bic)) return false;
-            return Regex.IsMatch(bic.Trim(), @"^[A-Za-z]{6}[A-Za-z0-9]{2}([A-Za-z0-9]{3})?$");
+            return BicRegex.IsMatch(bic.Trim());
         }
+
+        /// <summary>IBAN-Normalform für Vergleiche/Anzeige (nur Zeichen, groß).</summary>
+        public static string NormalisiereIban(string? iban) =>
+            string.IsNullOrWhiteSpace(iban)
+                ? ""
+                : new string(iban.Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
     }
 }

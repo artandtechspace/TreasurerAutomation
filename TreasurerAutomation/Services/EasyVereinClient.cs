@@ -1,20 +1,48 @@
+using System.Net;
+using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 
 namespace TreasurerAutomation.Services
 {
     /// <summary>
     /// A reusable client for interacting with the easyVerein API.
     /// Handles invoice creation, items mapping, document upload, and finalization.
+    /// Alle GETs laufen über einen TokenBucket (90/min, Burst 20), damit parallele
+    /// Aufrufe das API-Limit (100/min) nicht reißen und keine 429-Retry-Stürme entstehen.
+    /// Der Limiter ist thread-safe – der Client darf concurrent benutzt werden.
     /// </summary>
     public class EasyVereinClient : IDisposable
     {
+        /// <summary>Ziel-Durchsatz pro Minute (Puffer unter dem 100/min-Limit).</summary>
+        public const int RateLimitProMinute = 90;
+        /// <summary>Max. sofortige Requests (Burst). Muss über TokensProFenster liegen,
+        /// sonst deckelt der volle Bucket den Dauer-Durchsatz (Falle: 20/min statt 90/min).</summary>
+        public const int RateLimitBurst = 20;
+        /// <summary>
+        /// Refill-Fenster: klein und häufig statt 60s-Schüben (vermeidet Minuten-Stalls
+        /// und Bursts, die serverseitig 429er auslösen).
+        /// </summary>
+        private static readonly TimeSpan RateLimitFenster = TimeSpan.FromSeconds(2);
+        /// <summary>Tokens je Fenster, exakt auf RateLimitProMinute abgestimmt (3/2s = 90/min).</summary>
+        private static int RateLimitTokensProFenster => RateLimitProMinute / 30;
+        private const string DefaultBaseUrl = "https://easyverein.com/api/";
+
         private readonly HttpClient _httpClient;
         private readonly bool _ownsHttpClient;
+        private readonly TokenBucketRateLimiter _rateLimiter;
         private bool _disposed;
+        private int _requestCount;
+        private int _rateLimitHits;
 
         public string ApiToken { get; private set; }
+
+        /// <summary>Gesendete HTTP-Requests (inkl. Retries). Für Timing-/Diagnosezeilen.</summary>
+        public int RequestCount => _requestCount;
+        /// <summary>429/503-Antworten (sollten dank Limiter bei 0 bleiben).</summary>
+        public int RateLimitHits => _rateLimitHits;
 
         /// <summary>
         /// Wird von der API über den Response-Header "tokenRefreshNeeded" gesetzt
@@ -22,7 +50,8 @@ namespace TreasurerAutomation.Services
         /// </summary>
         public bool TokenRefreshNeeded { get; private set; }
 
-        public EasyVereinClient(string apiToken, HttpClient? httpClient = null)
+        public EasyVereinClient(string apiToken, HttpClient? httpClient = null,
+            int? rateLimitProMinute = null, int? rateLimitBurst = null)
         {
             if (string.IsNullOrWhiteSpace(apiToken))
             {
@@ -33,9 +62,20 @@ namespace TreasurerAutomation.Services
             _ownsHttpClient = httpClient == null;
             _httpClient = httpClient ?? new HttpClient
             {
-                BaseAddress = new Uri("https://easyverein.com/api/")
+                BaseAddress = new Uri(DefaultBaseUrl)
             };
             _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ApiToken);
+            _rateLimiter = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
+            {
+                TokenLimit = rateLimitBurst ?? RateLimitBurst,
+                ReplenishmentPeriod = RateLimitFenster,
+                TokensPerPeriod = rateLimitProMinute.HasValue
+                    ? Math.Max(1, rateLimitProMinute.Value / 30)
+                    : RateLimitTokensProFenster,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 10_000,
+                AutoReplenishment = true,
+            });
         }
 
         public void SetToken(string token)
@@ -76,7 +116,9 @@ namespace TreasurerAutomation.Services
             if (string.IsNullOrWhiteSpace(username)) throw new ArgumentException("Username fehlt.", nameof(username));
             if (password is null) throw new ArgumentException("Passwort fehlt.", nameof(password));
 
-            var client = httpClient ?? new HttpClient { BaseAddress = new Uri("https://easyverein.com/api/") };
+            var client = httpClient ?? new HttpClient { BaseAddress = new Uri(DefaultBaseUrl) };
+            // Nur selbst erzeugte Clients verwerfen (übergebene gehören dem Aufrufer/den Tests).
+            using var _ = httpClient == null ? client : null;
             var payload = new Dictionary<string, string>
             {
                 { "username", username.Trim() },
@@ -85,13 +127,14 @@ namespace TreasurerAutomation.Services
             if (!string.IsNullOrWhiteSpace(twoFA)) payload["2FA"] = twoFA.Trim();
 
             using var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-            using var response = await client.PostAsync("v2.0/get-token", content, cancellationToken);
+            using var response = await client.PostAsync(BuildUrl("get-token"), content, cancellationToken);
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                if ((int)response.StatusCode is 400 or 401 or 403)
-                    throw new Exception($"Login fehlgeschlagen ({(int)response.StatusCode}): Logindaten/2FA prüfen. Details: {Kuerze(body)}");
-                throw new Exception($"get-token returned {(int)response.StatusCode}: {Kuerze(body)}");
+                var status = (int)response.StatusCode;
+                if (status is 400 or 401 or 403)
+                    throw new EasyVereinApiException(status, $"Login fehlgeschlagen ({status}): Logindaten/2FA prüfen. Details: {Truncate(body)}");
+                throw new EasyVereinApiException(status, $"get-token returned {status}: {Truncate(body)}");
             }
             using var doc = JsonDocument.Parse(body);
             return EasyVereinTokenResponse.Parse(doc.RootElement);
@@ -103,11 +146,11 @@ namespace TreasurerAutomation.Services
         /// </summary>
         public async Task<EasyVereinTokenResponse> RefreshTokenAsync(CancellationToken cancellationToken = default)
         {
-            using var response = await _httpClient.GetAsync("v2.0/refresh-token", cancellationToken);
+            using var response = await _httpClient.GetAsync(BuildUrl("refresh-token"), cancellationToken);
             ObserveRefreshHeader(response);
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
             if (!response.IsSuccessStatusCode)
-                throw new Exception($"refresh-token returned {(int)response.StatusCode}: {Kuerze(body)}");
+                throw new Exception($"refresh-token returned {(int)response.StatusCode}: {Truncate(body)}");
             using var doc = JsonDocument.Parse(body);
             var el = doc.RootElement;
             // Antwortform A: volles Token-Objekt {token,...}; Form B: {token: "..."} pur
@@ -115,8 +158,9 @@ namespace TreasurerAutomation.Services
             if (el.TryGetProperty("token", out _) && el.ValueKind == JsonValueKind.Object)
             {
                 try { resp = EasyVereinTokenResponse.Parse(el); }
-                catch
+                catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
                 {
+                    // Parse kennt nur Form A – bei abweichenden Typen als reines Token lesen.
                     var t = el.GetProperty("token").GetString() ?? "";
                     resp = new EasyVereinTokenResponse(0, "", false, 0, t);
                 }
@@ -134,7 +178,19 @@ namespace TreasurerAutomation.Services
             return resp;
         }
 
-        private static string Kuerze(string s, int max = 300) =>
+        /// <summary>Baut "v2.0/pfad?query" (Pfad wird normiert).</summary>
+        private static string BuildUrl(string path, string? query = null) =>
+            $"v2.0/{path.Trim('/')}" + (string.IsNullOrWhiteSpace(query) ? "" : "?" + query.TrimStart('?'));
+
+        /// <summary>Wirft mit gekürztem Body bei Fehlerstatus (Status immer numerisch für Tests/Logs).</summary>
+        private static async Task EnsureSuccessAsync(HttpResponseMessage response, string vorgang, CancellationToken ct)
+        {
+            if (response.IsSuccessStatusCode) return;
+            var text = await response.Content.ReadAsStringAsync(ct);
+            throw new Exception($"{vorgang} returned {(int)response.StatusCode}: {Truncate(text)}");
+        }
+
+        private static string Truncate(string s, int max = 300) =>
             string.IsNullOrWhiteSpace(s) ? "" : (s.Length <= max ? s : s.Substring(0, max) + "…");
 
         /// <summary>
@@ -144,13 +200,13 @@ namespace TreasurerAutomation.Services
         {
             if (string.IsNullOrWhiteSpace(invNumber)) return false;
 
-            var url = $"v2.0/invoice?search={Uri.EscapeDataString(invNumber)}";
-            var response = await _httpClient.GetAsync(url, cancellationToken);
+            var url = BuildUrl("invoice", $"search={Uri.EscapeDataString(invNumber)}");
+            using var response = await GetWithRetryAsync(url, cancellationToken);
             ObserveRefreshHeader(response);
             if (!response.IsSuccessStatusCode)
             {
                 var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Invoice search returned {response.StatusCode}: {respText}");
+                throw new Exception($"easyVerein Invoice search returned {(int)response.StatusCode}: {Truncate(respText)}");
             }
 
             var respJson = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -188,13 +244,14 @@ namespace TreasurerAutomation.Services
             var absAmount = Math.Abs(amount);
 
             // Construct payload dynamically to optionally omit null bankAccount
-            var payload = new System.Collections.Generic.Dictionary<string, object>
+            var payload = new Dictionary<string, object>
             {
                 { "invNumber", referenceCode },
                 { "totalPrice", absAmount },
                 { "receiver", receiver },
                 { "date", date.ToString("yyyy-MM-dd") },
-                { "dateItHappend", date.ToString("yyyy-MM-dd") }, // Leistungsdatum
+                // Leistungsdatum (exakte API-Schreibweise inkl. Typo – nicht "korrigieren")
+                { "dateItHappend", date.ToString("yyyy-MM-dd") },
                 { "description", description },
                 { "isReceipt", true },
                 { "isDraft", true },
@@ -210,12 +267,8 @@ namespace TreasurerAutomation.Services
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            var response = await _httpClient.PostAsync("v2.0/invoice", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Invoice creation returned {response.StatusCode}: {respText}");
-            }
+            var response = await _httpClient.PostAsync(BuildUrl("invoice"), content, cancellationToken);
+            await EnsureSuccessAsync(response, "easyVerein Invoice creation", cancellationToken);
 
             var respJson = await response.Content.ReadAsStringAsync(cancellationToken);
             using var doc = JsonDocument.Parse(respJson);
@@ -247,12 +300,8 @@ namespace TreasurerAutomation.Services
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            var response = await _httpClient.PostAsync("v2.0/invoice-item", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Invoice Item creation returned {response.StatusCode}: {respText}");
-            }
+            var response = await _httpClient.PostAsync(BuildUrl("invoice-item"), content, cancellationToken);
+            await EnsureSuccessAsync(response, "easyVerein Invoice Item creation", cancellationToken);
         }
 
         /// <summary>
@@ -266,20 +315,20 @@ namespace TreasurerAutomation.Services
         {
             using var content = new MultipartFormDataContent();
             var fileContent = new ByteArrayContent(fileBytes);
-            
-            string contentType = filename.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
-                ? "application/pdf"
-                : "image/png";
-            
+
+            string contentType = Path.GetExtension(filename).ToLowerInvariant() switch
+            {
+                ".pdf" => "application/pdf",
+                ".png" => "image/png",
+                ".jpg" or ".jpeg" => "image/jpeg",
+                _ => "application/octet-stream",
+            };
+
             fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
             content.Add(fileContent, "path", filename);
 
-            var response = await _httpClient.PatchAsync($"v2.0/invoice/{invoiceId}", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Invoice file upload returned {response.StatusCode}: {respText}");
-            }
+            var response = await _httpClient.PatchAsync(BuildUrl($"invoice/{invoiceId}"), content, cancellationToken);
+            await EnsureSuccessAsync(response, "easyVerein Invoice file upload", cancellationToken);
         }
 
         /// <summary>
@@ -291,12 +340,8 @@ namespace TreasurerAutomation.Services
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            var response = await _httpClient.PatchAsync($"v2.0/invoice/{invoiceId}", content, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein Invoice finalization returned {response.StatusCode}: {respText}");
-            }
+            var response = await _httpClient.PatchAsync(BuildUrl($"invoice/{invoiceId}"), content, cancellationToken);
+            await EnsureSuccessAsync(response, "easyVerein Invoice finalization", cancellationToken);
         }
 
         /// <summary>
@@ -316,20 +361,14 @@ namespace TreasurerAutomation.Services
                 throw new ArgumentOutOfRangeException(nameof(maxPages), "maxPages muss >= 1 sein.");
 
             var result = new List<JsonElement>();
-            var start = $"v2.0/{endpoint.Trim('/')}" +
-                (string.IsNullOrWhiteSpace(query) ? "" : "?" + query.TrimStart('?'));
-            string? nextUrl = start;
+            string? nextUrl = BuildUrl(endpoint, query);
             var pages = 0;
 
             while (nextUrl != null && pages < maxPages)
             {
                 using var response = await GetWithRetryAsync(nextUrl, cancellationToken);
                 ObserveRefreshHeader(response);
-                if (!response.IsSuccessStatusCode)
-                {
-                    var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                    throw new Exception($"easyVerein GET {nextUrl} returned {(int)response.StatusCode}: {respText}");
-                }
+                await EnsureSuccessAsync(response, $"easyVerein GET {nextUrl}", cancellationToken);
 
                 var respJson = await response.Content.ReadAsStringAsync(cancellationToken);
                 using var doc = JsonDocument.Parse(respJson);
@@ -366,16 +405,12 @@ namespace TreasurerAutomation.Services
             if (string.IsNullOrWhiteSpace(path))
                 throw new ArgumentException("Path must be specified.", nameof(path));
 
-            var url = $"v2.0/{path.Trim('/')}";
+            var url = BuildUrl(path);
             using var response = await GetWithRetryAsync(url, cancellationToken);
             ObserveRefreshHeader(response);
-            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            if (response.StatusCode == HttpStatusCode.NotFound)
                 return null;
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein GET {url} returned {(int)response.StatusCode}: {respText}");
-            }
+            await EnsureSuccessAsync(response, $"easyVerein GET {url}", cancellationToken);
 
             var respJson = await response.Content.ReadAsStringAsync(cancellationToken);
             using var doc = JsonDocument.Parse(respJson);
@@ -383,9 +418,9 @@ namespace TreasurerAutomation.Services
         }
 
         /// <summary>
-        /// GET mit Retry bei Rate-Limit (429) / Service-Unavailable (503).
-        /// easyVerein limitiert auf 100/min – der Audit lädt ~3 Requests pro Mitglied.
-        /// Wartet Retry-After bzw. exponentiell (1s, 2s, 4s, …), max. 5 Versuche.
+        /// GET mit globalem Rate-Limit (TokenBucket) + Retry bei 429/503.
+        /// Durch den Limiter sind 429er die Ausnahme; Retry-After bzw.
+        /// exponentiell (1s, 2s, 4s, …), max. 5 Versuche.
         /// </summary>
         private async Task<System.Net.Http.HttpResponseMessage> GetWithRetryAsync(
             string url,
@@ -395,9 +430,12 @@ namespace TreasurerAutomation.Services
             var delay = TimeSpan.FromSeconds(1);
             for (var versuch = 1; ; versuch++)
             {
+                using var lease = await _rateLimiter.AcquireAsync(permitCount: 1, cancellationToken);
+                Interlocked.Increment(ref _requestCount);
                 var response = await _httpClient.GetAsync(url, cancellationToken);
                 if ((int)response.StatusCode != 429 && (int)response.StatusCode != 503)
                     return response;
+                Interlocked.Increment(ref _rateLimitHits);
                 if (versuch >= maxVersuche)
                     return response;
                 var warten = delay;
@@ -424,16 +462,12 @@ namespace TreasurerAutomation.Services
         {
             if (string.IsNullOrWhiteSpace(path))
                 throw new ArgumentException("Path must be specified.", nameof(path));
-            var url = $"v2.0/{path.Trim('/')}";
+            var url = BuildUrl(path);
             var json = JsonSerializer.Serialize(felder);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             using var response = await _httpClient.PatchAsync(url, content, cancellationToken);
             ObserveRefreshHeader(response);
-            if (!response.IsSuccessStatusCode)
-            {
-                var respText = await response.Content.ReadAsStringAsync(cancellationToken);
-                throw new Exception($"easyVerein PATCH {url} returned {(int)response.StatusCode}: {Kuerze(respText)}");
-            }
+            await EnsureSuccessAsync(response, $"easyVerein PATCH {url}", cancellationToken);
         }
 
         public void Dispose()
@@ -446,9 +480,11 @@ namespace TreasurerAutomation.Services
         {
             if (!_disposed)
             {
-                if (disposing && _ownsHttpClient)
+                if (disposing)
                 {
-                    _httpClient.Dispose();
+                    _rateLimiter.Dispose();
+                    if (_ownsHttpClient)
+                        _httpClient.Dispose();
                 }
                 _disposed = true;
             }

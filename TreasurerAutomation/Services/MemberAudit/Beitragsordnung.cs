@@ -48,6 +48,7 @@ namespace TreasurerAutomation.Services.MemberAudit
             bool ehrenmitglied = false,
             decimal freiwilligerZusatz = 0m)
         {
+            ArgumentNullException.ThrowIfNull(gruppenKuerzel);
             if (ehrenmitglied) return 0m;
 
             var basis = gruppenKuerzel

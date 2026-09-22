@@ -25,6 +25,12 @@ namespace TreasurerAutomation.Tests
             Assert.Equal("Müller \\\"GmbH\\\" \\\\ Co", SpendenquittungFileBuilder.EscapeTypst("Müller \"GmbH\" \\ Co"));
         }
 
+        [Fact]
+        public void EscapeTypst_MaskiertSteuerzeichen()
+        {
+            Assert.Equal("Zeile1\\nZeile2\\r\\nTab\\tEnde", SpendenquittungFileBuilder.EscapeTypst("Zeile1\nZeile2\r\nTab\tEnde"));
+        }
+
         private static SpendenquittungDaten MusterDaten() => new(
             "Stadtwerke Rheine GmbH", "Hafenbahn 10", "48431 Rheine",
             "1.000,00 EUR", "eintausend Euro", "14.09.2026",

@@ -40,14 +40,19 @@ namespace TreasurerAutomation.Commands
     {
         // Freistellungsbescheid FA Steinfurt vom 12.08.2026 für 2024, taggenau 5 Jahre gültig.
         private static readonly DateTime Freistellungsdatum = new(2026, 8, 12);
+        /// <summary>Vereinfachter Nachweis reicht bis 300 € (trotzdem darf formal bestätigt werden).</summary>
+        private const decimal Kleinbetragsgrenze = 300m;
+        /// <summary>Freistellungsbescheid max. 5 Jahre alt (§ 63 Abs. 5 AO).</summary>
+        private const int FreistellungGueltigJahre = 5;
+        /// <summary>Timeout für 'typst compile'.</summary>
+        private static readonly TimeSpan KompilierTimeout = TimeSpan.FromMinutes(2);
 
         private static readonly CultureInfo De = new("de-DE");
 
         protected override async Task<int> ExecuteAsync(CommandContext context, SpendenquittungSettings settings,
             CancellationToken cancellationToken)
         {
-            AnsiConsole.Write(new Rule("[yellow]Zuwendungsbestätigung – Wizard[/]").RuleStyle("grey").LeftJustified());
-            Console.WriteLine();
+            ConsoleHelper.PrintHeader("Zuwendungsbestätigung – Wizard");
 
             var vorlagenDir = FindeVorlagenDir(settings.VorlagenDir);
             if (vorlagenDir == null)
@@ -77,8 +82,8 @@ namespace TreasurerAutomation.Commands
             var betrag = FrageBetrag();
             var betragZiffern = $"{betrag.ToString("N2", De)} EUR";
             var betragBuchstaben = GermanNumberToWords.BetragInWorten(betrag);
-            if (betrag <= 300)
-                AnsiConsole.MarkupLine("[blue]ℹ[/] Bis 300 € würde der vereinfachte Nachweis (Kontoauszug) reichen – eine formelle Bestätigung darf trotzdem ausgestellt werden.");
+            if (betrag <= Kleinbetragsgrenze)
+                AnsiConsole.MarkupLine($"[blue]ℹ[/] Bis {Kleinbetragsgrenze:N0} € würde der vereinfachte Nachweis (Kontoauszug) reichen – eine formelle Bestätigung darf trotzdem ausgestellt werden.");
 
             // 4. Tag der Zuwendung
             var tagZuwendung = FrageDatum("Tag der Zuwendung", DateTime.Today);
@@ -107,9 +112,9 @@ namespace TreasurerAutomation.Commands
                 AnsiConsole.MarkupLine("[red]✘ Fehler:[/] Ausstellungsdatum liegt vor dem Tag der Zuwendung.");
                 return 1;
             }
-            if (ausstellungsdatum >= Freistellungsdatum.AddYears(5))
+            if (ausstellungsdatum >= Freistellungsdatum.AddYears(FreistellungGueltigJahre))
             {
-                AnsiConsole.MarkupLine($"[red]✘ Fehler:[/] Freistellungsbescheid vom {Freistellungsdatum:dd.MM.yyyy} ist am {ausstellungsdatum:dd.MM.yyyy} älter als 5 Jahre (§ 63 Abs. 5 AO) – keine gültige Bestätigung möglich.");
+                AnsiConsole.MarkupLine($"[red]✘ Fehler:[/] Freistellungsbescheid vom {Freistellungsdatum:dd.MM.yyyy} ist am {ausstellungsdatum:dd.MM.yyyy} älter als {FreistellungGueltigJahre} Jahre (§ 63 Abs. 5 AO) – keine gültige Bestätigung möglich.");
                 return 1;
             }
 
@@ -160,7 +165,7 @@ namespace TreasurerAutomation.Commands
 
             if (!settings.SkipCompile)
             {
-                var (gefunden, ok, ausgabe) = Kompiliere(typPfad, pdfPfad);
+                var (gefunden, ok, ausgabe) = await KompiliereAsync(typPfad, pdfPfad, cancellationToken);
                 if (!gefunden)
                 {
                     AnsiConsole.MarkupLine("[yellow]⚠[/] 'typst' nicht im PATH gefunden. Nur .typ erzeugt – manuell kompilieren mit:");
@@ -340,7 +345,8 @@ namespace TreasurerAutomation.Commands
             Console.WriteLine();
         }
 
-        private static (bool Gefunden, bool Ok, string Ausgabe) Kompiliere(string typPfad, string pdfPfad)
+        private static async Task<(bool Gefunden, bool Ok, string Ausgabe)> KompiliereAsync(
+            string typPfad, string pdfPfad, CancellationToken ct)
         {
             var psi = new ProcessStartInfo("typst", $"compile \"{typPfad}\" \"{pdfPfad}\"")
             {
@@ -353,8 +359,21 @@ namespace TreasurerAutomation.Commands
                 using var prozess = Process.Start(psi);
                 if (prozess == null)
                     return (true, false, "Prozess konnte nicht gestartet werden.");
-                prozess.WaitForExit();
-                var ausgabe = prozess.StandardOutput.ReadToEnd() + prozess.StandardError.ReadToEnd();
+                // Ausgaben schon während des Laufs lesen (kein Deadlock bei viel Output).
+                var outTask = prozess.StandardOutput.ReadToEndAsync(ct);
+                var errTask = prozess.StandardError.ReadToEndAsync(ct);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(KompilierTimeout);
+                try
+                {
+                    await prozess.WaitForExitAsync(timeout.Token);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    try { prozess.Kill(entireProcessTree: true); } catch { /* best effort */ }
+                    return (true, false, $"Zeitüberschreitung (>{KompilierTimeout.TotalMinutes:N0} Min) – typst abgebrochen.");
+                }
+                var ausgabe = await outTask + await errTask;
                 return (true, prozess.ExitCode == 0, ausgabe);
             }
             catch (Win32Exception)

@@ -11,12 +11,17 @@
       <PackageReference Include="Spectre.Console" Version="0.57.0" />
       <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
       <PackageReference Include="SumUp" Version="0.0.15" />
+      <PackageReference Include="System.Threading.RateLimiting" Version="10.0.12" />
     </ItemGroup>
 
     <ItemGroup>
       <None Update="test_receipt.pdf">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       </None>
+    </ItemGroup>
+
+    <ItemGroup>
+      <InternalsVisibleTo Include="TreasurerAutomation.Tests" />
     </ItemGroup>
 
 </Project>

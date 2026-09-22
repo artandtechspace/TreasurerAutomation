@@ -35,6 +35,7 @@ namespace TreasurerAutomation.Services
                 throw new ArgumentException("Betrag darf maximal 2 Nachkommastellen haben.", nameof(betrag));
 
             var euro = (long)decimal.Truncate(betrag);
+            // Exakt (kein Rundungsfehler): decimal rechnet basis-10, Eingabe hat max. 2 Stellen (s.o.).
             var cent = (int)((betrag - euro) * 100);
 
             var sb = new StringBuilder();

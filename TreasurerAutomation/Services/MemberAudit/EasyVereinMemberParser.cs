@@ -11,6 +11,8 @@ namespace TreasurerAutomation.Services.MemberAudit
     /// </summary>
     public static class EasyVereinMemberParser
     {
+        private static readonly System.Globalization.CultureInfo DeDe = new("de-DE");
+
         public static MemberRecord Parse(
             JsonElement member,
             JsonElement? contactDetails,
@@ -20,11 +22,11 @@ namespace TreasurerAutomation.Services.MemberAudit
         {
             var cd = contactDetails ?? GetObject(member, "contactDetails", "contactdetails");
 
-            var vorname = cd.HasValue ? GetString(cd.Value, "firstName", "firstname") : null;
-            var nachname = cd.HasValue ? GetString(cd.Value, "familyName", "familyname", "lastName") : null;
+            var vorname = cd.HasValue ? GetString(cd.Value, "firstName") : null;
+            var nachname = cd.HasValue ? GetString(cd.Value, "familyName", "lastName") : null;
             var anzeige = $"{vorname} {nachname}".Trim();
             if (string.IsNullOrWhiteSpace(anzeige))
-                anzeige = GetString(member, "membershipNumber", "membershipnumber") is { } nr
+                anzeige = GetString(member, "membershipNumber") is { } nr
                     ? $"Mitglied {nr}"
                     : $"Mitglied #{GetInt(member, "id")?.ToString() ?? "?"}";
 
@@ -35,16 +37,16 @@ namespace TreasurerAutomation.Services.MemberAudit
                 .Distinct()
                 .ToList();
 
-            // Custom fields: Namen normalisiert (Excel hat trailing spaces + Sternchen)
+            // Custom fields: Namen normalisiert (Excel hat trailing spaces + Sternchen).
+            // Lookup einmal aufbauen statt pro Name alle Werte zu normieren (O(n²) -> O(n)).
+            var normiert = customValues
+                .GroupBy(kv => NormKey(kv.Key))
+                .ToDictionary(g => g.Key, g => g.First().Value);
             string? Custom(params string[] namen)
             {
                 foreach (var n in namen)
-                {
-                    var key = NormKey(n);
-                    var treffer = customValues.FirstOrDefault(kv => NormKey(kv.Key) == key);
-                    if (!treffer.Equals(default(KeyValuePair<string, string?>)) || customValues.Any(kv => NormKey(kv.Key) == key))
-                        return treffer.Value;
-                }
+                    if (normiert.TryGetValue(NormKey(n), out var wert))
+                        return wert;
                 return null;
             }
 
@@ -55,6 +57,8 @@ namespace TreasurerAutomation.Services.MemberAudit
             var newsletterRoh = Custom("Freiwilliger E-Mail-Newsletter", "Newsletter");
             var freiwilligRoh = Custom("Freiwilliger Beitrag", "freiwilligerBeitrag", "VBF");
 
+            var zahlungsart = cd.HasValue ? GetInt(cd.Value, "methodOfPayment") ?? 0 : 0;
+
             return new MemberRecord
             {
                 Id = GetInt(member, "id") ?? 0,
@@ -62,45 +66,45 @@ namespace TreasurerAutomation.Services.MemberAudit
                 DisplayName = anzeige,
                 Vorname = vorname,
                 Nachname = nachname,
-                LoginEmail = GetString(member, "emailOrUserName", "emailorusername", "email"),
+                LoginEmail = GetString(member, "emailOrUserName", "email"),
                 PrimaereEmail = cd.HasValue
-                    ? GetString(cd.Value, "primaryEmail", "primaryemail", "privateEmail", "privateemail", "companyEmail")
+                    ? GetString(cd.Value, "primaryEmail", "privateEmail", "companyEmail")
                     ?? GetString(member, "emailOrUserName", "email")
                     : GetString(member, "emailOrUserName", "email"),
-                PrivateEmail = cd.HasValue ? GetString(cd.Value, "privateEmail", "privateemail") : null,
-                CompanyEmail = cd.HasValue ? GetString(cd.Value, "companyEmail", "companyemail") : null,
-                Geburtstag = cd.HasValue ? GetDate(cd.Value, "dateOfBirth", "dateofbirth", "birthday") : null,
+                PrivateEmail = cd.HasValue ? GetString(cd.Value, "privateEmail") : null,
+                CompanyEmail = cd.HasValue ? GetString(cd.Value, "companyEmail") : null,
+                Geburtstag = cd.HasValue ? GetDate(cd.Value, "dateOfBirth", "birthday") : null,
                 Strasse = cd.HasValue ? GetString(cd.Value, "street") : null,
                 Plz = cd.HasValue ? GetString(cd.Value, "zip", "plz", "postalCode") : null,
                 Stadt = cd.HasValue ? GetString(cd.Value, "city", "stadt") : null,
                 Land = cd.HasValue ? GetString(cd.Value, "country", "land") : null,
 
-                Eintrittsdatum = GetDate(member, "joinDate", "joindate", "entryDate"),
-                Austrittsdatum = GetDate(member, "resignationDate", "resignationdate", "exitDate"),
-                Kuendigungsdatum = GetDate(member, "resignationNoticeDate", "resignationnoticedate"),
-                Antragsdatum = GetDate(member, "_applicationDate", "applicationDate", "applicationdate"),
+                Eintrittsdatum = GetDate(member, "joinDate", "entryDate"),
+                Austrittsdatum = GetDate(member, "resignationDate", "exitDate"),
+                Kuendigungsdatum = GetDate(member, "resignationNoticeDate"),
+                Antragsdatum = GetDate(member, "_applicationDate", "applicationDate"),
                 Aufnahmedatum = GetDate(member, "_applicationWasAcceptedAt", "applicationWasAcceptedAt", "acceptedAt"),
 
-                Zahlungsart = cd.HasValue ? GetInt(cd.Value, "methodOfPayment", "methodofpayment") ?? 0 : 0,
-                ZahlungsartText = cd.HasValue ? ZahlungsartTextFuer(GetInt(cd.Value, "methodOfPayment", "methodofpayment") ?? 0) : "unbekannt",
+                Zahlungsart = zahlungsart,
+                ZahlungsartText = cd.HasValue ? ZahlungsartTextFuer(zahlungsart) : "unbekannt",
                 Iban = cd.HasValue ? GetString(cd.Value, "iban") : null,
                 Bic = cd.HasValue ? GetString(cd.Value, "bic") : null,
-                KontoinhaberAbweichend = cd.HasValue ? GetString(cd.Value, "bankAccountOwner", "bankaccountowner") : null,
-                Mandatsreferenz = cd.HasValue ? GetString(cd.Value, "sepaMandate", "sepamandate", "mandateReference") : null,
+                KontoinhaberAbweichend = cd.HasValue ? GetString(cd.Value, "bankAccountOwner") : null,
+                Mandatsreferenz = cd.HasValue ? GetString(cd.Value, "sepaMandate", "mandateReference") : null,
                 Mandatsdatum = cd.HasValue ? GetDate(cd.Value, "sepaDate", "sepadata", "mandateDate") : null,
                 Saldo = cd.HasValue ? GetDecimal(cd.Value, "balance") ?? 0m : 0m,
 
-                Leistungsbeginn = GetDate(member, "_paymentStartDate", "paymentStartDate", "paymentstartdate"),
-                NaechsteZahlung = GetDate(member, "nextPayment", "nextpayment", "_nextPayment"),
-                IndividuellerBeitrag = GetDecimal(member, "paymentAmount", "paymentamount") ?? 0m,
-                ZahlungsintervallMonate = GetInt(member, "paymentIntervallMonths", "paymentintervallmonths") ?? 12,
+                Leistungsbeginn = GetDate(member, "_paymentStartDate", "paymentStartDate"),
+                NaechsteZahlung = GetDate(member, "nextPayment", "_nextPayment"),
+                IndividuellerBeitrag = GetDecimal(member, "paymentAmount") ?? 0m,
+                ZahlungsintervallMonate = GetInt(member, "paymentIntervallMonths") ?? 12,
 
                 GruppenKuerzel = kuerzel,
                 GruppenNamen = gruppenNamen.ToList(),
 
                 Ehrenmitglied = ErkenneEhrenmitglied(gruppenNamen, kuerzel),
                 Vorstand = kuerzel.Contains("VV") || gruppenNamen.Any(n => n.Contains("Vorstand", StringComparison.OrdinalIgnoreCase)),
-                IstFirma = cd.HasValue && (GetBool(cd.Value, "_isCompany", "isCompany", "iscompany") ?? false),
+                IstFirma = cd.HasValue && (GetBool(cd.Value, "_isCompany", "isCompany") ?? false),
 
                 SepaEinverstaendnis = ParseJaNein(sepaRoh),
                 NachweisDatei = string.IsNullOrWhiteSpace(nachweis) ? null : nachweis.Trim(),
@@ -125,7 +129,7 @@ namespace TreasurerAutomation.Services.MemberAudit
         {
             if (string.IsNullOrWhiteSpace(v)) return 0m;
             var s = v.Trim().Replace("EUR", "", StringComparison.OrdinalIgnoreCase).Trim();
-            if (decimal.TryParse(s, System.Globalization.NumberStyles.Any, new System.Globalization.CultureInfo("de-DE"), out var d)) return d;
+            if (decimal.TryParse(s, System.Globalization.NumberStyles.Any, DeDe, out var d)) return d;
             if (decimal.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d2)) return d2;
             return 0m;
         }
@@ -200,7 +204,7 @@ namespace TreasurerAutomation.Services.MemberAudit
                         if (!string.IsNullOrWhiteSpace(s))
                         {
                             s = s.Replace("EUR", "", StringComparison.OrdinalIgnoreCase).Trim();
-                            if (decimal.TryParse(s, System.Globalization.NumberStyles.Any, new System.Globalization.CultureInfo("de-DE"), out var d2)) return d2;
+                            if (decimal.TryParse(s, System.Globalization.NumberStyles.Any, DeDe, out var d2)) return d2;
                             if (decimal.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d3)) return d3;
                         }
                     }
@@ -240,11 +244,12 @@ namespace TreasurerAutomation.Services.MemberAudit
                     if (prop.Value.ValueKind == JsonValueKind.String)
                     {
                         var s = prop.Value.GetString();
-                        if (string.IsNullOrWhiteSpace(s) || s is "n/a" or "N/A") continue;
+                        if (string.IsNullOrWhiteSpace(s)) continue;
                         s = s.Trim();
+                        if (s.Equals("n/a", StringComparison.OrdinalIgnoreCase) || s is "-" or "–" or "—" or "keine Angabe") continue;
                         // 1. Deutsch exakt (Excel/API-Altformat): TT.MM.JJJJ
                         if (DateTime.TryParseExact(s, new[] { "dd.MM.yyyy", "d.M.yyyy", "dd.MM.yyyy HH:mm:ss", "dd.MM.yyyy HH:mm" },
-                                new System.Globalization.CultureInfo("de-DE"),
+                                DeDe,
                                 System.Globalization.DateTimeStyles.None, out var de))
                             return de.Date;
                         // 2. API-Format YYYY-MM-DD (+ optional Zeit, Breaking Change Juli 2026: nur Datum)
@@ -253,7 +258,7 @@ namespace TreasurerAutomation.Services.MemberAudit
                                 System.Globalization.DateTimeStyles.AssumeUniversal, out var iso))
                             return iso.Date;
                         // 3. Fallback allgemein (de zuerst, damit 10.01. nicht als Oct 1 gelesen wird)
-                        if (DateTime.TryParse(s, new System.Globalization.CultureInfo("de-DE"),
+                        if (DateTime.TryParse(s, DeDe,
                                 System.Globalization.DateTimeStyles.None, out var dt2))
                             return dt2.Date;
                         if (DateTime.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
@@ -301,7 +306,7 @@ namespace TreasurerAutomation.Services.MemberAudit
                     var s = item.GetString()?.Trim();
                     if (!string.IsNullOrWhiteSpace(s))
                     {
-                        if (s.Length <= 8 || s.StartsWith("VB", StringComparison.OrdinalIgnoreCase) || s is "VV")
+                        if (SiehtAusWieKuerzel(s))
                             kuerzel.Add(s.ToUpperInvariant());
                         else namen.Add(s);
                     }
@@ -322,12 +327,16 @@ namespace TreasurerAutomation.Services.MemberAudit
                     }
                     if (!string.IsNullOrWhiteSpace(kurz)) kuerzel.Add(kurz.Trim().ToUpperInvariant());
                     if (!string.IsNullOrWhiteSpace(name)) namen.Add(name.Trim());
-                    // Fallback: nur Name vorhanden, der wie Kürzel aussieht
-                    if (kurz == null && name != null && (name.Length <= 8 && (name.StartsWith("VB", StringComparison.OrdinalIgnoreCase) || name == "VV")))
+                    // Fallback: nur Name vorhanden, der wie Kürzel aussieht (kurz + VB/VV)
+                    if (kurz == null && name != null && name.Length <= 8 && SiehtAusWieKuerzel(name))
                         kuerzel.Add(name.ToUpperInvariant());
                 }
             }
             return (kuerzel.Distinct().ToList(), namen.Distinct().ToList());
         }
+
+        /// <summary>Heuristik: kurz oder VB-Präfix → Kürzel, sonst Name.</summary>
+        private static bool SiehtAusWieKuerzel(string s) =>
+            s.Length <= 8 || s.StartsWith("VB", StringComparison.OrdinalIgnoreCase) || s == "VV";
     }
 }

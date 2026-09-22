@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -39,6 +40,21 @@ namespace TreasurerAutomation.Tests
 
         private static EasyVereinClient ClientMitStub(StubHandler stub) =>
             new("TESTTOKEN", new HttpClient(stub) { BaseAddress = new Uri("http://test/") });
+
+        private sealed class ZaehlStub : HttpMessageHandler
+        {
+            private int _calls;
+            public int Calls => _calls;
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            {
+                Interlocked.Increment(ref _calls);
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"id\":1}", Encoding.UTF8, "application/json")
+                });
+            }
+        }
 
         [Fact]
         public void Konstruktor_LehntLeerenTokenAb()
@@ -109,6 +125,46 @@ namespace TreasurerAutomation.Tests
             var client = ClientMitStub(stub);
 
             await Assert.ThrowsAsync<ArgumentException>(() => client.ListRawAsync(""));
+        }
+
+        [Fact]
+        public async Task GetSingleRawAsync_ZaehltRequestsUndLimitHits()
+        {
+            var stub = new StubHandler();
+            stub.JsonEinreihen("{}", HttpStatusCode.TooManyRequests);
+            stub.JsonEinreihen("{\"id\":7}");
+            var client = ClientMitStub(stub);
+
+            var el = await client.GetSingleRawAsync("member/7");
+
+            Assert.NotNull(el);
+            Assert.Equal(7, el.Value.GetProperty("id").GetInt32());
+            Assert.Equal(2, client.RequestCount);
+            Assert.Equal(1, client.RateLimitHits);
+        }
+
+        [Fact]
+        public async Task RateLimiter_StautNichtMinutenlang()
+        {
+            // 30 parallele GETs bei Burst 20: Mit 60s-Refill-Fenster dauern die
+            // letzten 10 bis zum Minutenschub (~60s), mit glattem 2s-Fenster ~2s.
+            // (Achtung: TokenLimit deckelt zusätzlich – Burst < TokensProFenster
+            // würde den Dauer-Durchsatz drosseln, daher Burst 20 hier.)
+            var stub = new ZaehlStub();
+            using var client = new EasyVereinClient("TESTTOKEN",
+                new HttpClient(stub) { BaseAddress = new Uri("http://test/") },
+                rateLimitProMinute: 3600, rateLimitBurst: 20);
+            var uhr = Stopwatch.StartNew();
+            await Parallel.ForEachAsync(Enumerable.Range(0, 30),
+                new ParallelOptions { MaxDegreeOfParallelism = 10 },
+                async (_, ct) => await client.GetSingleRawAsync("member/1", ct));
+            uhr.Stop();
+
+            Assert.Equal(30, stub.Calls);
+            Assert.Equal(30, client.RequestCount);
+            Assert.Equal(0, client.RateLimitHits);
+            Assert.True(uhr.Elapsed < TimeSpan.FromSeconds(20),
+                $"Dauerte {uhr.Elapsed.TotalSeconds:N0}s – Refill staut minutenlang statt glatt zu füllen.");
         }
     }
 }

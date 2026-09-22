@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Spectre.Console;
@@ -82,6 +83,15 @@ namespace TreasurerAutomation.Commands
     /// </summary>
     public sealed class MemberAuditCommand : AsyncCommand<MemberAuditSettings>
     {
+        /// <summary>Gleichzeitige Detail-Ladungen (je ~3 Requests, Pacing via Client-Limiter).</summary>
+        private const int MaxParallelMembers = 10;
+        /// <summary>Max. Tabellenzeilen (Rest per csv/json).</summary>
+        private const int MaxTabellenZeilen = 200;
+        /// <summary>Max. Länge Mitglied-Spalte (einzeilig).</summary>
+        private const int MaxNameLaenge = 24;
+        /// <summary>Top-Forderungen in der Statistik.</summary>
+        private const int TopForderungen = 10;
+
         protected override async Task<int> ExecuteAsync(CommandContext context, MemberAuditSettings settings,
             CancellationToken cancellationToken)
         {
@@ -89,8 +99,7 @@ namespace TreasurerAutomation.Commands
             var heute = DateTime.Today;
             var format = settings.Format.Trim().ToLowerInvariant();
 
-            AnsiConsole.Write(new Rule($"[yellow]Mitglieder-Audit {jahr} (read-only)[/]").RuleStyle("grey").LeftJustified());
-            Console.WriteLine();
+            ConsoleHelper.PrintHeader($"Mitglieder-Audit {jahr} (read-only)");
 
             try
             {
@@ -115,82 +124,13 @@ namespace TreasurerAutomation.Commands
                     return res1.BlockerCount > 0 && settings.FailOnBlocker ? 2 : 0;
                 }
 
-                var query = $"limit={settings.Limit}";
-                if (!string.IsNullOrWhiteSpace(settings.Search))
-                    query += $"&search={Uri.EscapeDataString(settings.Search.Trim())}";
-
-                List<JsonElement> members = new();
-                await AnsiConsole.Status().Spinner(Spinner.Known.Dots).SpinnerStyle(Style.Parse("yellow bold"))
-                    .StartAsync("Lade Mitglieder (GET v2.0/member)…", async _ =>
-                    {
-                        members = (await client.ListRawAsync("member", query, settings.MaxPages, cancellationToken)).ToList();
-                    });
-                AnsiConsole.MarkupLine($"[grey]Mitglieder:[/] {members.Count}" +
-                    (string.IsNullOrWhiteSpace(settings.Search) ? "" : $"  [grey](Filter:[/] {Markup.Escape(settings.Search.Trim())}[grey])[/]"));
-
-                // Hilfs-Lookups (best effort, Fehler tolerieren – Audit läuft auch ohne).
-                // Live-Endpunkte heißen singular: member-group, custom-field.
-                var gruppenLookup = await LadeLookup(client, "member-group", cancellationToken);
-                var customDefLookup = await LadeLookup(client, "custom-field", cancellationToken);
-
-                var records = new List<(JsonElement Json, MemberRecord Record)>();
-                await AnsiConsole.Status().Spinner(Spinner.Known.Dots).SpinnerStyle(Style.Parse("yellow bold"))
-                    .StartAsync("Lade Details (Kontakt, Gruppen, Nachweise)…", async ctx =>
-                    {
-                        var n = 0;
-                        foreach (var m in members)
-                        {
-                            n++;
-                            ctx.Status($"Lade Details ({n}/{members.Count})…");
-                            var (cd, kuerzel, namen, customs) = await Anreichern(client, m, gruppenLookup, customDefLookup, cancellationToken);
-                            records.Add((m, EasyVereinMemberParser.Parse(m, cd, kuerzel, namen, customs)));
-                            // Drosselung: API-Limit 100/min bei ~3 Requests/Mitglied
-                            if (n < members.Count)
-                                await Task.Delay(500, cancellationToken);
-                        }
-                    });
-
-                var results = records.Select(x => MemberAuditService.Audit(x.Record, jahr, heute)).ToList();
-                var technischUnvollstaendig = ErgänzeTechnikFindings(records, results);
-                ErgänzeDuplikatFindings(results);
-                var summary = MemberAuditService.Zusammenfassen(results, jahr);
+                var (summary, technischUnvollstaendig) =
+                    await LadeGesamtAuditAsync(client, settings, jahr, heute, cancellationToken);
                 if (technischUnvollstaendig > 0)
                     AnsiConsole.MarkupLine($"[yellow]⚠ Bei {technischUnvollstaendig} Mitglied(ern) konnten Kontakt-/Gruppendaten nicht geladen werden (Rate-Limit). " +
                         $"Befunde dort ggf. unvollständig – Lauf wiederholen.[/]");
 
-                if (format == "json")
-                {
-                    var json = BuildJson(summary);
-                    await Ausgeben(json, settings.Output, cancellationToken);
-                }
-                else if (format == "csv")
-                {
-                    var csv = BuildCsv(summary);
-                    await Ausgeben(csv, settings.Output, cancellationToken);
-                }
-                else
-                {
-                    ZeigeTabelle(summary, settings.NurProbleme);
-                    // Interaktive Einzelauswahl bei Suche mit mehreren Treffern
-                    if (!string.IsNullOrWhiteSpace(settings.Search) && summary.Ergebnisse.Count > 1
-                        && summary.Ergebnisse.Count <= 30 && settings.Output is null)
-                    {
-                        var gewaehlt = FrageMitgliedAuswahl(summary);
-                        if (gewaehlt != null) ZeigeDetail(gewaehlt, jahr);
-                    }
-                }
-
-                Console.WriteLine();
-                AnsiConsole.MarkupLine($"[grey]Geprüft:[/] {summary.Geprueft}  [green]einzugsfähig:[/] {summary.Einzugsfaehig}  [green]SEPA:[/] {summary.SepaEinziehbar}  [red]mit Blocker:[/] {summary.MitBlocker}  [yellow]mit Warnung:[/] {summary.MitWarnung}");
-                AnsiConsole.MarkupLine($"[grey]Soll-Summe einzugsfähig:[/] {summary.SummeSollEinzugsfaehig:N2} €  [grey]davon SEPA:[/] {summary.SummeSollSepa:N2} €");
-                if (summary.SummeFreiwillig > 0)
-                    AnsiConsole.MarkupLine($"[grey]Darin freiwillige Zusätze (VBF):[/] {summary.SummeFreiwillig:N2} €");
-                if (summary.MitForderung > 0)
-                    AnsiConsole.MarkupLine($"[grey]Offene Salden:[/] {summary.MitForderung} Mitglieder, Saldo {summary.SummeSaldoOffen:N2} € + Säumnis ca. {summary.SummeSaeumnis:N2} € (§5: 1 €/7 Tage, unverbindlich)");
-                AnsiConsole.MarkupLine("[grey]Regeln: Beitragsordnung §2/§3/§7 (01=24€, 02=80€, 02.1=30€, 03=60€, 04=100€, 50% nach 30.06.), Satzung §4/§5/§8, SEPA §7 Abs. 3. Nur GET, nichts geschrieben.[/]");
-
-                if (settings.Statistik && format == "table")
-                    ZeigeStatistik(summary);
+                await GebeSummaryAus(summary, settings, format, jahr, cancellationToken);
 
                 await AutoRefreshHinweis(client, settings.EasyVereinToken);
 
@@ -208,7 +148,106 @@ namespace TreasurerAutomation.Commands
             }
         }
 
-        // ---------- Laden/Anreichern (nur GET) ----------
+        // ---------- Laden/Anreichern/Audit (nur GET) ----------
+
+        /// <summary>Lädt alle Mitglieder + Details und auditiert sie. Gibt Summary + Technik-Lücken zurück.</summary>
+        private static async Task<(MemberAuditSummary Summary, int TechnischUnvollstaendig)> LadeGesamtAuditAsync(
+            EasyVereinClient client, MemberAuditSettings settings, int jahr, DateTime heute, CancellationToken cancellationToken)
+        {
+            var query = $"limit={settings.Limit}";
+            if (!string.IsNullOrWhiteSpace(settings.Search))
+                query += $"&search={Uri.EscapeDataString(settings.Search.Trim())}";
+
+            // Mitglieder + Hilfs-Lookups laufen concurrent (voneinander unabhängig, best effort).
+            // Live-Endpunkte heißen singular: member-group, custom-field.
+            var memberTask = client.ListRawAsync("member", query, settings.MaxPages, cancellationToken);
+            var gruppenTask = LadeLookup(client, "member-group", cancellationToken);
+            var customDefTask = LadeLookup(client, "custom-field", cancellationToken);
+            List<JsonElement> members = new();
+            Dictionary<string, JsonElement> gruppenLookup = new();
+            Dictionary<string, JsonElement> customDefLookup = new();
+            await AnsiConsole.Status().Spinner(Spinner.Known.Dots).SpinnerStyle(Style.Parse("yellow bold"))
+                .StartAsync("Lade Mitglieder + Stammdaten (GET v2.0/member)…", async _ =>
+                {
+                    await Task.WhenAll(memberTask, gruppenTask, customDefTask);
+                    members = (await memberTask).ToList();
+                    gruppenLookup = await gruppenTask;
+                    customDefLookup = await customDefTask;
+                });
+            AnsiConsole.MarkupLine($"[grey]Mitglieder:[/] {members.Count}" +
+                (string.IsNullOrWhiteSpace(settings.Search) ? "" : $"  [grey](Filter:[/] {Markup.Escape(settings.Search.Trim())}[grey])[/]"));
+
+            // Details parallel (MaxParallelMembers gleichzeitig, je ~3 Requests).
+            // Pacing übernimmt der Rate-Limiter im Client (90/min) statt blunt Delay –
+            // dadurch keine 429-Retry-Stürme und keine Idle-Zeit bei Latenz.
+            var angereichert = new (JsonElement Json, MemberRecord Record)[members.Count];
+            var fertig = 0;
+            var uhr = Stopwatch.StartNew();
+            var requestsVorher = client.RequestCount;
+            var limitHitsVorher = client.RateLimitHits;
+            await AnsiConsole.Status().Spinner(Spinner.Known.Dots).SpinnerStyle(Style.Parse("yellow bold"))
+                .StartAsync("Lade Details (Kontakt, Gruppen, Nachweise)…", async ctx =>
+                {
+                    var statusLock = new object();
+                    await Parallel.ForEachAsync(
+                        Enumerable.Range(0, members.Count),
+                        new ParallelOptions { MaxDegreeOfParallelism = MaxParallelMembers, CancellationToken = cancellationToken },
+                        async (i, ct) =>
+                        {
+                            var m = members[i];
+                            var (cd, kuerzel, namen, customs) = await Anreichern(client, m, gruppenLookup, customDefLookup, ct);
+                            angereichert[i] = (m, EasyVereinMemberParser.Parse(m, cd, kuerzel, namen, customs));
+                            var n = Interlocked.Increment(ref fertig);
+                            lock (statusLock) ctx.Status($"Lade Details ({n}/{members.Count})…");
+                        });
+                });
+            uhr.Stop();
+            AnsiConsole.MarkupLine($"[grey]Details: {members.Count} Mitglieder in {uhr.Elapsed.TotalSeconds:N0}s " +
+                $"({client.RequestCount - requestsVorher} Requests, {client.RateLimitHits - limitHitsVorher}× 429/503).[/]");
+
+            var records = angereichert.ToList();
+            var results = records.Select(x => MemberAuditService.Audit(x.Record, jahr, heute)).ToList();
+            var technischUnvollstaendig = ErgänzeTechnikFindings(records, results);
+            ErgänzeDuplikatFindings(results);
+            return (MemberAuditService.Zusammenfassen(results, jahr), technischUnvollstaendig);
+        }
+
+        /// <summary>Gibt die Summary aus (table/csv/json + Summenzeilen + optional Statistik).</summary>
+        private static async Task GebeSummaryAus(
+            MemberAuditSummary summary, MemberAuditSettings settings, string format, int jahr, CancellationToken cancellationToken)
+        {
+            if (format == "json")
+            {
+                await Ausgeben(BuildJson(summary), settings.Output, cancellationToken);
+            }
+            else if (format == "csv")
+            {
+                await Ausgeben(BuildCsv(summary), settings.Output, cancellationToken);
+            }
+            else
+            {
+                ZeigeTabelle(summary, settings.NurProbleme);
+                // Interaktive Einzelauswahl bei Suche mit mehreren Treffern
+                if (!string.IsNullOrWhiteSpace(settings.Search) && summary.Ergebnisse.Count > 1
+                    && summary.Ergebnisse.Count <= 30 && settings.Output is null)
+                {
+                    var gewaehlt = FrageMitgliedAuswahl(summary);
+                    if (gewaehlt != null) ZeigeDetail(gewaehlt, jahr);
+                }
+            }
+
+            Console.WriteLine();
+            AnsiConsole.MarkupLine($"[grey]Geprüft:[/] {summary.Geprueft}  [green]einzugsfähig:[/] {summary.Einzugsfaehig}  [green]SEPA:[/] {summary.SepaEinziehbar}  [red]mit Blocker:[/] {summary.MitBlocker}  [yellow]mit Warnung:[/] {summary.MitWarnung}");
+            AnsiConsole.MarkupLine($"[grey]Soll-Summe einzugsfähig:[/] {summary.SummeSollEinzugsfaehig:N2} €  [grey]davon SEPA:[/] {summary.SummeSollSepa:N2} €");
+            if (summary.SummeFreiwillig > 0)
+                AnsiConsole.MarkupLine($"[grey]Darin freiwillige Zusätze (VBF):[/] {summary.SummeFreiwillig:N2} €");
+            if (summary.MitForderung > 0)
+                AnsiConsole.MarkupLine($"[grey]Offene Salden:[/] {summary.MitForderung} Mitglieder, Saldo {summary.SummeSaldoOffen:N2} € + Säumnis ca. {summary.SummeSaeumnis:N2} € (§5: 1 €/7 Tage, unverbindlich)");
+            AnsiConsole.MarkupLine("[grey]Regeln: Beitragsordnung §2/§3/§7 (01=24€, 02=80€, 02.1=30€, 03=60€, 04=100€, 50% nach 30.06.), Satzung §4/§5/§8, SEPA §7 Abs. 3. Nur GET, nichts geschrieben.[/]");
+
+            if (settings.Statistik && format == "table")
+                ZeigeStatistik(summary);
+        }
 
         private static async Task<JsonElement?> LadeEinzelmitglied(
             EasyVereinClient client, string eingabe, CancellationToken ct)
@@ -228,19 +267,12 @@ namespace TreasurerAutomation.Commands
             {
                 var treffer = await client.ListRawAsync("member", $"limit=10&search={Uri.EscapeDataString(eingabe)}", maxPages: 1, ct);
                 // exakte Mitgliedsnummer bevorzugen
-                foreach (var t in treffer)
-                {
-                    var nr = EasyVereinMemberParser.GetString(t, "membershipNumber", "membershipnumber");
-                    if (string.Equals(nr?.Trim(), eingabe.Trim(), StringComparison.OrdinalIgnoreCase))
-                        return t;
-                }
+                var perNummer = treffer.FirstOrDefault(t => PasstNummerOderId(t, eingabe, nurNummer: true));
+                if (perNummer.ValueKind != JsonValueKind.Undefined) return perNummer;
                 if (treffer.Count == 1) return treffer[0];
                 // bei ID-Eingabe auch nach id filtern
-                foreach (var t in treffer)
-                {
-                    if (EasyVereinMemberParser.GetInt(t, "id")?.ToString() == eingabe.Trim())
-                        return t;
-                }
+                var perId = treffer.FirstOrDefault(t => PasstNummerOderId(t, eingabe));
+                if (perId.ValueKind != JsonValueKind.Undefined) return perId;
                 if (treffer.Count > 0) return treffer[0];
             }
             catch { /* lokaler Fallback unten */ }
@@ -248,17 +280,20 @@ namespace TreasurerAutomation.Commands
             try
             {
                 var alle = await client.ListRawAsync("member", "limit=100", maxPages: 3, ct);
-                foreach (var t in alle)
-                {
-                    var nr = EasyVereinMemberParser.GetString(t, "membershipNumber", "membershipnumber");
-                    if (string.Equals(nr?.Trim(), eingabe.Trim(), StringComparison.OrdinalIgnoreCase))
-                        return t;
-                    if (EasyVereinMemberParser.GetInt(t, "id")?.ToString() == eingabe.Trim())
-                        return t;
-                }
+                var fund = alle.FirstOrDefault(t => PasstNummerOderId(t, eingabe));
+                if (fund.ValueKind != JsonValueKind.Undefined) return fund;
             }
             catch { return null; }
             return null;
+        }
+
+        /// <summary>Trifft, wenn Mitgliedsnummer oder (außer bei nurNummer) ID zur Eingabe passt.</summary>
+        private static bool PasstNummerOderId(JsonElement t, string eingabe, bool nurNummer = false)
+        {
+            var ziel = eingabe.Trim();
+            var nr = EasyVereinMemberParser.GetString(t, "membershipNumber");
+            if (string.Equals(nr?.Trim(), ziel, StringComparison.OrdinalIgnoreCase)) return true;
+            return !nurNummer && EasyVereinMemberParser.GetInt(t, "id")?.ToString() == ziel;
         }
 
         private static MemberAuditResult? FrageMitgliedAuswahl(MemberAuditSummary summary)
@@ -266,17 +301,18 @@ namespace TreasurerAutomation.Commands
             try
             {
                 if (!AnsiConsole.Profile.Capabilities.Interactive) return null;
+                const string nein = "Nein, Übersicht reicht";
+                var optionen = summary.Ergebnisse.Select(r =>
+                    $"{r.Mitglied.MembershipNumber ?? r.Mitglied.Id.ToString()} · {r.Mitglied.DisplayName} " +
+                    $"({(r.BlockerCount > 0 ? $"{r.BlockerCount}x ✘" : r.WarnungCount > 0 ? $"{r.WarnungCount}x ⚠" : "ok")}, Soll {r.SollBeitrag:N2} €)").ToList();
                 var auswahl = new SelectionPrompt<string>()
                     .Title("Detail für einzelnes Mitglied anzeigen?")
-                    .AddChoices(new[] { "Nein, Übersicht reicht" }.Concat(
-                        summary.Ergebnisse.Select(r =>
-                            $"{r.Mitglied.MembershipNumber ?? r.Mitglied.Id.ToString()} · {r.Mitglied.DisplayName} " +
-                            $"({(r.BlockerCount > 0 ? $"{r.BlockerCount}x ✘" : r.WarnungCount > 0 ? $"{r.WarnungCount}x ⚠" : "ok")}, Soll {r.SollBeitrag:N2} €)")));
+                    .AddChoices(new[] { nein }.Concat(optionen));
                 var gewaehlt = AnsiConsole.Prompt(auswahl);
-                if (gewaehlt.StartsWith("Nein,")) return null;
-                var nr = gewaehlt.Split('·')[0].Trim();
-                return summary.Ergebnisse.FirstOrDefault(r =>
-                    (r.Mitglied.MembershipNumber ?? r.Mitglied.Id.ToString()) == nr);
+                if (gewaehlt == nein) return null;
+                // Index statt String-Parsing (Namen können '·' enthalten).
+                var idx = optionen.IndexOf(gewaehlt);
+                return idx >= 0 ? summary.Ergebnisse[idx] : null;
             }
             catch { return null; }
         }
@@ -309,7 +345,7 @@ namespace TreasurerAutomation.Commands
                 tabelle.AddRow("Forderung", $"{r.ForderungGesamt:N2} € (Saldo {m.Saldo:N2} € + Säumnis {r.SaeumnisZuschlag:N2} €, {r.TageVerzug} Tage) – {Markup.Escape(r.MahnVorschlag ?? "–")}");
             AnsiConsole.Write(tabelle);
             Console.WriteLine();
-            foreach (var f in r.Findings.OrderBy(f => f.Severity == FindingSeverity.Blocker ? 0 : f.Severity == FindingSeverity.Warnung ? 1 : 2))
+            foreach (var f in SortierteFindings(r.Findings))
             {
                 var icon = f.Severity == FindingSeverity.Blocker ? "[red]✘[/]" : f.Severity == FindingSeverity.Warnung ? "[yellow]⚠[/]" : "[blue]ℹ[/]";
                 AnsiConsole.MarkupLine($"{icon} [bold]{Markup.Escape(f.Code)}[/] ({f.Severity}) {Markup.Escape(f.Nachricht)}");
@@ -320,7 +356,7 @@ namespace TreasurerAutomation.Commands
         private static string MaskiereIban(string? iban)
         {
             if (string.IsNullOrWhiteSpace(iban)) return "– fehlt";
-            var s = new string(iban.Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
+            var s = FieldValidators.NormalisiereIban(iban);
             if (s.Length < 8) return "****";
             return s.Substring(0, 4) + " **** **** " + s.Substring(s.Length - 4);
         }
@@ -413,24 +449,39 @@ namespace TreasurerAutomation.Commands
                 Dictionary<string, JsonElement> customDefLookup,
                 CancellationToken ct)
         {
-            // 1. contactDetails: live eine URL-Referenz -> PK extrahieren -> GET
-            JsonElement? cd = EasyVereinMemberParser.GetObject(member, "contactDetails", "contactdetails");
-            if (cd == null)
-            {
-                var refId = KontaktId(member);
-                if (refId != null)
-                {
-                    try { cd = await client.GetSingleRawAsync($"contact-details/{refId}", ct); }
-                    catch { /* best effort */ }
-                }
-            }
+            // Kontakt, Gruppen und Customs sind voneinander unabhängig -> concurrent laden.
+            var mid = EasyVereinMemberParser.GetInt(member, "id");
+            var kontaktTask = LadeKontakt(client, member, ct);
+            var gruppenTask = LadeGruppen(client, member, mid, gruppenLookup, ct);
+            var customsTask = LadeCustoms(client, member, mid, customDefLookup, ct);
+            await Task.WhenAll(kontaktTask, gruppenTask, customsTask);
+            var (kuerzel, namen) = await gruppenTask;
+            return (await kontaktTask, kuerzel, namen, await customsTask);
+        }
 
-            // 2. Gruppen live: GET member/{id}/groups (Assoziationen mit memberGroup-URL + paymentActive),
-            //    Short/Name aus gecachtem member-group Lookup. Nur paymentActive zählt für den Beitrag;
-            //    Namen aller (inkl. inaktivem VV) für Vorstandserkennung behalten.
+        /// <summary>contactDetails: eingebettetes Objekt oder GET per URL-Referenz (best effort).</summary>
+        private static async Task<JsonElement?> LadeKontakt(
+            EasyVereinClient client, JsonElement member, CancellationToken ct)
+        {
+            var eingebettet = EasyVereinMemberParser.GetObject(member, "contactDetails", "contactdetails");
+            if (eingebettet != null) return eingebettet;
+            var refId = KontaktId(member);
+            if (refId == null) return null;
+            try { return await client.GetSingleRawAsync($"contact-details/{refId}", ct); }
+            catch { return null; } // best effort
+        }
+
+        /// <summary>
+        /// Gruppen live: GET member/{id}/groups (Assoziationen mit memberGroup-URL + paymentActive),
+        /// Short/Name aus gecachtem member-group Lookup. Nur paymentActive zählt für den Beitrag;
+        /// Namen aller (inkl. inaktivem VV) für Vorstandserkennung behalten.
+        /// </summary>
+        private static async Task<(List<string> Kuerzel, List<string> Namen)> LadeGruppen(
+            EasyVereinClient client, JsonElement member, int? mid,
+            Dictionary<string, JsonElement> gruppenLookup, CancellationToken ct)
+        {
             var kuerzel = new List<string>();
             var namen = new List<string>();
-            var mid = EasyVereinMemberParser.GetInt(member, "id");
             if (mid.HasValue)
             {
                 try
@@ -447,8 +498,7 @@ namespace TreasurerAutomation.Commands
                         }
                         if (gid != null && gruppenLookup.TryGetValue(gid, out var gdef))
                         {
-                            var k = EasyVereinMemberParser.GetString(gdef, "short", "shortName", "shortcut", "abbreviation", "code");
-                            var n = EasyVereinMemberParser.GetString(gdef, "name", "title", "label");
+                            var (k, n) = LiesKurzUndName(gdef);
                             if (!string.IsNullOrWhiteSpace(n)) namen.Add(n.Trim());
                             if (aktiv && !string.IsNullOrWhiteSpace(k)) kuerzel.Add(k.Trim().ToUpperInvariant());
                             else if (!aktiv && !string.IsNullOrWhiteSpace(k) && k.Trim().Equals("VV", StringComparison.OrdinalIgnoreCase))
@@ -468,18 +518,23 @@ namespace TreasurerAutomation.Commands
                 {
                     if (gruppenLookup.TryGetValue(gid, out var gdef))
                     {
-                        var k = EasyVereinMemberParser.GetString(gdef, "short", "shortName", "shortcut", "abbreviation", "code");
-                        var n = EasyVereinMemberParser.GetString(gdef, "name", "title", "label");
+                        var (k, n) = LiesKurzUndName(gdef);
                         if (!string.IsNullOrWhiteSpace(k)) kuerzel.Add(k.Trim().ToUpperInvariant());
                         if (!string.IsNullOrWhiteSpace(n)) namen.Add(n.Trim());
                     }
                 }
             }
-            kuerzel = kuerzel.Distinct().ToList();
-            namen = namen.Distinct().ToList();
+            return (kuerzel.Distinct().ToList(), namen.Distinct().ToList());
+        }
 
-            // 3. Custom fields live: GET member/{id}/custom-fields ({customField: URL, value}),
-            //    Name via custom-field Lookup (PK aus URL). value enthält auch Datei-URLs (Nachweis).
+        /// <summary>
+        /// Custom fields live: GET member/{id}/custom-fields ({customField: URL, value}),
+        /// Name via custom-field Lookup (PK aus URL). value enthält auch Datei-URLs (Nachweis).
+        /// </summary>
+        private static async Task<Dictionary<string, string?>> LadeCustoms(
+            EasyVereinClient client, JsonElement member, int? mid,
+            Dictionary<string, JsonElement> customDefLookup, CancellationToken ct)
+        {
             var customs = ParseEingebetteteCustoms(member, customDefLookup);
             if (customs.Count == 0 && mid.HasValue)
             {
@@ -494,9 +549,13 @@ namespace TreasurerAutomation.Commands
                 }
                 catch { /* best effort */ }
             }
-
-            return (cd, kuerzel, namen, customs);
+            return customs;
         }
+
+        /// <summary>Kurz (Beitragsklasse) + Name aus Gruppen-Definition, Keys je API-Form.</summary>
+        private static (string? Kurz, string? Name) LiesKurzUndName(JsonElement gdef) => (
+            EasyVereinMemberParser.GetString(gdef, "short", "shortName", "shortcut", "abbreviation", "code"),
+            EasyVereinMemberParser.GetString(gdef, "name", "title", "label"));
 
         private static string? KontaktId(JsonElement member)
         {
@@ -623,35 +682,21 @@ namespace TreasurerAutomation.Commands
 
         internal static void ErgänzeDuplikatFindings(List<MemberAuditResult> results)
         {
-            foreach (var grp in results
-                         .Where(r => FieldValidators_IstEmail(r.Mitglied.PrimaereEmail))
-                         .GroupBy(r => r.Mitglied.PrimaereEmail!.Trim().ToLowerInvariant())
-                         .Where(g => g.Count() > 1))
-            {
-                foreach (var r in grp)
-                    r.Findings.Add(new("STAMM_EMAIL_DUPLIKAT", "Stammdaten", FindingSeverity.Warnung,
-                        $"Primäre E-Mail '{grp.Key}' mehrfach vergeben – Eindeutigkeit prüfen."));
-            }
-            foreach (var grp in results
-                         .Where(r => !string.IsNullOrWhiteSpace(r.Mitglied.Mandatsreferenz))
-                         .GroupBy(r => r.Mitglied.Mandatsreferenz!.Trim())
-                         .Where(g => g.Count() > 1))
-            {
-                foreach (var r in grp)
-                    r.Findings.Add(new("SEPA_MANDATSREF_DUPLIKAT", "Bank", FindingSeverity.Blocker,
-                        $"Mandatsreferenz '{grp.Key}' mehrfach vergeben – muss eindeutig sein."));
-            }
+            MeldeDuplikate(results,
+                r => FieldValidators.IstGueltigeEmail(r.Mitglied.PrimaereEmail)
+                    ? r.Mitglied.PrimaereEmail!.Trim().ToLowerInvariant() : null,
+                "STAMM_EMAIL_DUPLIKAT", "Stammdaten", FindingSeverity.Warnung,
+                (key, _) => $"Primäre E-Mail '{key}' mehrfach vergeben – Eindeutigkeit prüfen.");
+            MeldeDuplikate(results,
+                r => string.IsNullOrWhiteSpace(r.Mitglied.Mandatsreferenz) ? null : r.Mitglied.Mandatsreferenz.Trim(),
+                "SEPA_MANDATSREF_DUPLIKAT", "Bank", FindingSeverity.Blocker,
+                (key, _) => $"Mandatsreferenz '{key}' mehrfach vergeben – muss eindeutig sein.");
             // Gleiche IBAN bei mehreren Mitgliedern: oft Familie/Elternkonto (ok), aber prüfen.
-            foreach (var grp in results
-                         .Where(r => !string.IsNullOrWhiteSpace(r.Mitglied.Iban))
-                         .GroupBy(r => new string(r.Mitglied.Iban!.Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant())
-                         .Where(g => g.Count() > 1))
-            {
-                foreach (var r in grp)
-                    r.Findings.Add(new("BANK_IBAN_GETEILT", "Bank", FindingSeverity.Info,
-                        $"IBAN wird von {grp.Count()} Mitgliedern genutzt – ok bei Familie/Elternkonto, sonst prüfen."));
-            }
-            // Gleicher Name + Geburtstag: möglicher Doppel-Eintrag.
+            MeldeDuplikate(results,
+                r => string.IsNullOrWhiteSpace(r.Mitglied.Iban) ? null : FieldValidators.NormalisiereIban(r.Mitglied.Iban),
+                "BANK_IBAN_GETEILT", "Bank", FindingSeverity.Info,
+                (_, anzahl) => $"IBAN wird von {anzahl} Mitgliedern genutzt – ok bei Familie/Elternkonto, sonst prüfen.");
+            // Gleicher Name + Geburtstag: möglicher Doppel-Eintrag (Tupel-Schlüssel, kollisionsfrei).
             foreach (var grp in results
                          .Where(r => !string.IsNullOrWhiteSpace(r.Mitglied.Vorname)
                              && !string.IsNullOrWhiteSpace(r.Mitglied.Nachname) && r.Mitglied.Geburtstag.HasValue)
@@ -665,8 +710,23 @@ namespace TreasurerAutomation.Commands
             }
         }
 
-        private static bool FieldValidators_IstEmail(string? m) =>
-            Services.MemberAudit.FieldValidators.IstGueltigeEmail(m);
+        /// <summary>Markiert alle Mitglieder, deren Schlüssel (null = überspringen) mehrfach vorkommt.</summary>
+        private static void MeldeDuplikate(
+            List<MemberAuditResult> results,
+            Func<MemberAuditResult, string?> schluessel,
+            string code, string kategorie, FindingSeverity schwere,
+            Func<string, int, string> nachricht)
+        {
+            foreach (var grp in results
+                         .Select(r => (Ergebnis: r, Key: schluessel(r)))
+                         .Where(x => x.Key != null)
+                         .GroupBy(x => x.Key!)
+                         .Where(g => g.Count() > 1))
+            {
+                foreach (var (ergebnis, _) in grp)
+                    ergebnis.Findings.Add(new(code, kategorie, schwere, nachricht(grp.Key, grp.Count())));
+            }
+        }
 
         // ---------- Ausgabe ----------
 
@@ -686,17 +746,16 @@ namespace TreasurerAutomation.Commands
                 .Where(r => !nurProbleme || r.Findings.Any(f => f.Severity != FindingSeverity.Info))
                 .ToList();
 
-            foreach (var r in liste.Take(200))
+            foreach (var r in liste.Take(MaxTabellenZeilen))
             {
                 var status = r.SepaEinziehbar ? "[green]SEPA[/]"
                     : r.Einzugsfaehig ? "[green]ja[/]"
                     : r.BlockerCount > 0 ? "[red]blockiert[/]" : "[yellow]prüfen[/]";
                 var nameRoh = $"{r.Mitglied.MembershipNumber ?? r.Mitglied.Id.ToString()} · {r.Mitglied.DisplayName}";
-                if (nameRoh.Length > 24) nameRoh = nameRoh.Substring(0, 23) + "…";
-                var top = r.Findings
-                    .OrderBy(f => f.Severity == FindingSeverity.Blocker ? 0 : f.Severity == FindingSeverity.Warnung ? 1 : 2)
+                if (nameRoh.Length > MaxNameLaenge) nameRoh = nameRoh.Substring(0, MaxNameLaenge - 1) + "…";
+                var top = SortierteFindings(r.Findings)
                     .Take(2)
-                    .Select(f => $"{(f.Severity == FindingSeverity.Blocker ? "✘" : f.Severity == FindingSeverity.Warnung ? "⚠" : "ℹ")}\u00A0{KurzBefund(f, r)}")
+                    .Select(f => $"{BefundIcon(f.Severity)}\u00A0{KurzBefund(f, r)}")
                     .ToArray();
                 var befund = top.Length == 0 ? "[grey]ok[/]" : string.Join(", ", top);
                 if (r.Findings.Count > 2) befund += $" [grey]+{r.Findings.Count - 2}[/]";
@@ -711,18 +770,30 @@ namespace TreasurerAutomation.Commands
                     befund);
             }
             AnsiConsole.Write(tabelle);
-            if (liste.Count > 200)
-                AnsiConsole.MarkupLine($"[grey]… {liste.Count - 200} weitere (per --format csv/json vollständig).[/]");
+            if (liste.Count > MaxTabellenZeilen)
+                AnsiConsole.MarkupLine($"[grey]… {liste.Count - MaxTabellenZeilen} weitere (per --format csv/json vollständig).[/]");
             if (liste.Any(r => r.Findings.Count > 2))
                 AnsiConsole.MarkupLine("[grey]Befunde gekürzt (+n) – Details: --member <ID/Nummer> oder Klick-Auswahl bei Suche.[/]");
         }
+
+        /// <summary>Blocker zuerst, dann Warnung, dann Info.</summary>
+        private static IOrderedEnumerable<MemberFinding> SortierteFindings(IEnumerable<MemberFinding> findings) =>
+            findings.OrderBy(f => f.Severity == FindingSeverity.Blocker ? 0 : f.Severity == FindingSeverity.Warnung ? 1 : 2);
+
+        /// <summary>Icon je Schwere (ohne Markup, per NBSP mit Text verbinden).</summary>
+        private static string BefundIcon(FindingSeverity severity) => severity switch
+        {
+            FindingSeverity.Blocker => "✘",
+            FindingSeverity.Warnung => "⚠",
+            _ => "ℹ",
+        };
 
         /// <summary>
         /// Kurztext für die Tabellen-Spalte: sagt in 2–4 Worten, was genau fehlt
         /// (statt kryptischem Code). Langfassung steht in Finding.Nachricht
         /// (Detailansicht --member, csv/json). Unbekannte Codes fallen auf den Code zurück.
         /// </summary>
-        private static string KurzBefund(MemberFinding f, MemberAuditResult r) => f.Code switch
+        internal static string KurzBefund(MemberFinding f, MemberAuditResult r) => f.Code switch
         {
             "STATUS_AUSGETRETEN" => "ausgetreten, kein Einzug",
             "STAMM_NAME_FEHLT" => "Name fehlt",
@@ -774,44 +845,36 @@ namespace TreasurerAutomation.Commands
             Console.WriteLine();
             AnsiConsole.Write(new Rule("[yellow]Statistik[/]").RuleStyle("grey").LeftJustified());
 
-            var g = new Table().Border(TableBorder.Rounded);
-            g.AddColumn("[bold]Gruppe[/]");
-            g.AddColumn("[bold]Anzahl[/]");
-            g.AddColumn("[bold]Soll-Summe[/]");
-            foreach (var grp in s.Ergebnisse
-                         .SelectMany(r => r.Mitglied.GruppenKuerzel.DefaultIfEmpty("–").Select(k => (Mitglied: r, Kuerzel: k)))
-                         .GroupBy(x => x.Kuerzel).OrderByDescending(x => x.Count()))
-                g.AddRow(Markup.Escape(grp.Key), grp.Count().ToString(), $"{grp.Sum(x => x.Mitglied.SollBeitrag):N2} €");
-            AnsiConsole.Write(g);
+            ZeigeZaehltabelle(["Gruppe", "Anzahl", "Soll-Summe"],
+                s.Ergebnisse
+                    .SelectMany(r => r.Mitglied.GruppenKuerzel.DefaultIfEmpty("–").Select(k => (Mitglied: r, Kuerzel: k)))
+                    .GroupBy(x => x.Kuerzel).OrderByDescending(x => x.Count())
+                    .Select(g => new[] { g.Key, g.Count().ToString(), $"{g.Sum(x => x.Mitglied.SollBeitrag):N2} €" }));
+            ZeigeZaehltabelle(["Zahlungsart", "Anzahl"],
+                s.Ergebnisse.GroupBy(r => r.Mitglied.ZahlungsartText).OrderByDescending(x => x.Count())
+                    .Select(g => new[] { g.Key, g.Count().ToString() }));
+            ZeigeZaehltabelle(["Eintrittsjahr", "Anzahl"],
+                s.Ergebnisse.Where(r => r.Mitglied.Eintrittsdatum.HasValue)
+                    .GroupBy(r => r.Mitglied.Eintrittsdatum!.Value.Year).OrderBy(x => x.Key)
+                    .Select(g => new[] { g.Key.ToString(), g.Count().ToString() }));
 
-            var z = new Table().Border(TableBorder.Rounded);
-            z.AddColumn("[bold]Zahlungsart[/]");
-            z.AddColumn("[bold]Anzahl[/]");
-            foreach (var grp in s.Ergebnisse.GroupBy(r => r.Mitglied.ZahlungsartText).OrderByDescending(x => x.Count()))
-                z.AddRow(Markup.Escape(grp.Key), grp.Count().ToString());
-            AnsiConsole.Write(z);
-
-            var e = new Table().Border(TableBorder.Rounded);
-            e.AddColumn("[bold]Eintrittsjahr[/]");
-            e.AddColumn("[bold]Anzahl[/]");
-            foreach (var grp in s.Ergebnisse
-                         .Where(r => r.Mitglied.Eintrittsdatum.HasValue)
-                         .GroupBy(r => r.Mitglied.Eintrittsdatum!.Value.Year).OrderBy(x => x.Key))
-                e.AddRow(grp.Key.ToString(), grp.Count().ToString());
-            AnsiConsole.Write(e);
-
-            var top = s.Ergebnisse.Where(r => r.Mitglied.Saldo > 0).OrderByDescending(r => r.ForderungGesamt).Take(10).ToList();
+            var top = s.Ergebnisse.Where(r => r.Mitglied.Saldo > 0).OrderByDescending(r => r.ForderungGesamt).Take(TopForderungen).ToList();
             if (top.Count > 0)
-            {
-                var f = new Table().Border(TableBorder.Rounded);
-                f.AddColumn("[bold]Top-Forderungen[/]");
-                f.AddColumn("[bold]Saldo + Säumnis[/]");
-                f.AddColumn("[bold]Vorschlag[/]");
-                foreach (var r in top)
-                    f.AddRow(Markup.Escape($"{r.Mitglied.MembershipNumber ?? r.Mitglied.Id.ToString()} · {r.Mitglied.DisplayName}"),
-                        $"{r.ForderungGesamt:N2} €", Markup.Escape(r.MahnVorschlag ?? "–"));
-                AnsiConsole.Write(f);
-            }
+                ZeigeZaehltabelle(["Top-Forderungen", "Saldo + Säumnis", "Vorschlag"],
+                    top.Select(r => new[]
+                    {
+                        $"{r.Mitglied.MembershipNumber ?? r.Mitglied.Id.ToString()} · {r.Mitglied.DisplayName}",
+                        $"{r.ForderungGesamt:N2} €", r.MahnVorschlag ?? "–",
+                    }));
+        }
+
+        /// <summary>Kleine Zähltabelle (Kopf + plain-text Zeilen, escaped).</summary>
+        private static void ZeigeZaehltabelle(string[] kopf, IEnumerable<string[]> zeilen)
+        {
+            var tabelle = new Table().Border(TableBorder.Rounded);
+            foreach (var h in kopf) tabelle.AddColumn($"[bold]{Markup.Escape(h)}[/]");
+            foreach (var z in zeilen) tabelle.AddRow(z.Select(Markup.Escape).ToArray());
+            AnsiConsole.Write(tabelle);
         }
 
         private static string BuildCsv(MemberAuditSummary s)

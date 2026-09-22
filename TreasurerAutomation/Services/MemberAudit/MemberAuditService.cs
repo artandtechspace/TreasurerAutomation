@@ -20,7 +20,52 @@ namespace TreasurerAutomation.Services.MemberAudit
                     $"Austrittsdatum {m.Austrittsdatum:dd.MM.yyyy} erreicht – kein Einzug für {beitragsjahr}."));
             }
 
-            // ---------- 1. Stammdaten ----------
+            PruefeStammdaten(m, heute, findings);
+            var klassen = PruefeBeitragsklassen(m, findings);
+            PruefeNachweise(m, klassen, beitragsjahr, findings);
+
+            // ---------- 4. SEPA-Readiness (§7 Abs. 3) ----------
+            var soll = Beitragsordnung.SollBeitrag(m.GruppenKuerzel, m.Eintrittsdatum, beitragsjahr, m.Ehrenmitglied, m.FreiwilligerZusatz);
+            var basis = Beitragsordnung.SollBeitrag(m.GruppenKuerzel, m.Eintrittsdatum, beitragsjahr, m.Ehrenmitglied);
+
+            if (m.Ehrenmitglied)
+            {
+                findings.Add(new("BEITRAG_EHRENMITGLIED", "Beitrag", FindingSeverity.Info,
+                    "Ehrenmitglied (§4 Abs. 3 Satzung) – von Beiträgen befreit, Soll 0€."));
+            }
+
+            var sepaFaehig = PruefeSepa(m, heute, findings);
+
+            var (tageVerzug, saeumnis, mahnVorschlag) =
+                PruefeStatusUndForderung(m, soll, beitragsjahr, heute, ausgetreten, findings);
+
+            var blocker = findings.Any(f => f.Severity == FindingSeverity.Blocker);
+            // Ehrenmitglied (Soll 0) ist formal "einzugsfähig" – nichts zu tun, nie SEPA.
+            var einzugsfaehig = m.Ehrenmitglied
+                ? !blocker && !ausgetreten
+                : !blocker && !ausgetreten && (m.Zahlungsart == 1 || m.Zahlungsart == 2);
+            var sepaEinziehbar = !m.Ehrenmitglied && einzugsfaehig && m.Zahlungsart == 1 && sepaFaehig;
+
+            return new MemberAuditResult
+            {
+                Mitglied = m,
+                Findings = findings,
+                SollBeitrag = ausgetreten ? 0m : soll,
+                SollBasis = ausgetreten ? 0m : basis,
+                Einzugsfaehig = einzugsfaehig,
+                SepaEinziehbar = sepaEinziehbar,
+                TageVerzug = tageVerzug,
+                SaeumnisZuschlag = saeumnis,
+                MahnVorschlag = mahnVorschlag,
+            };
+        }
+
+        /// <summary>Mahnung 1 ab 4 Wochen (5 €), Mahnung 2 ab 10 Wochen (10 €) – Fristen §5.</summary>
+        private const int MahnStufe1Tage = 28;
+        private const int MahnStufe2Tage = 70;
+
+        private static void PruefeStammdaten(MemberRecord m, DateTime heute, List<MemberFinding> findings)
+        {
             if (string.IsNullOrWhiteSpace(m.Vorname) && string.IsNullOrWhiteSpace(m.Nachname) && !m.IstFirma)
                 findings.Add(new("STAMM_NAME_FEHLT", "Stammdaten", FindingSeverity.Blocker,
                     "Vor- und Nachname fehlen – Zuordnung/Mahnung nicht möglich."));
@@ -29,8 +74,7 @@ namespace TreasurerAutomation.Services.MemberAudit
                 findings.Add(new("STAMM_ADRESSE_UNVOLLSTAENDIG", "Stammdaten", FindingSeverity.Warnung,
                     "Adresse unvollständig (Straße/PLZ/Stadt nötig für Mahnungen, §5 Satzung / §14)."));
 
-            if (!string.IsNullOrWhiteSpace(m.Plz) && !FieldValidators.IstGueltigeDePlz(m.Plz) &&
-                string.IsNullOrWhiteSpace(m.Land))
+            if (!string.IsNullOrWhiteSpace(m.Plz) && !FieldValidators.IstGueltigeDePlz(m.Plz) && IstDeutschOderLeer(m.Land))
                 findings.Add(new("STAMM_PLZ_FORMAT", "Stammdaten", FindingSeverity.Warnung,
                     $"PLZ '{m.Plz}' sieht nicht wie 5-stellige DE-PLZ aus."));
 
@@ -52,8 +96,15 @@ namespace TreasurerAutomation.Services.MemberAudit
             if (!m.Eintrittsdatum.HasValue)
                 findings.Add(new("STATUS_EINTRITT_FEHLT", "Status", FindingSeverity.Warnung,
                     "Eintrittsdatum (joinDate) fehlt – 50%-Regel (§7 Abs. 6) nicht prüfbar."));
+        }
 
-            // ---------- 2. Beitragsklasse ----------
+        private static bool IstDeutschOderLeer(string? land) =>
+            string.IsNullOrWhiteSpace(land) ||
+            land.Trim().ToLowerInvariant() is "deutschland" or "de" or "deu" or "germany";
+
+        /// <summary>Prüft Beitragsklassen-Zuordnung, gibt die gültigen Klassen zurück.</summary>
+        private static List<string> PruefeBeitragsklassen(MemberRecord m, List<MemberFinding> findings)
+        {
             var klassen = m.GruppenKuerzel.Where(Beitragsordnung.IstBeitragsklasse).Distinct().ToList();
             if (klassen.Count == 0 && !m.Ehrenmitglied)
                 findings.Add(new("BEITRAG_KLASSE_FEHLT", "Beitrag", FindingSeverity.Blocker,
@@ -69,14 +120,19 @@ namespace TreasurerAutomation.Services.MemberAudit
                 findings.Add(new("BEITRAG_VB04_OHNE_FIRMA", "Beitrag", FindingSeverity.Warnung,
                     "VB04 zugeordnet, aber nicht als Firma markiert – prüfen."));
 
+            // 12 = jährlich (§2), 1 = monatlich, -1 = einmalig – alles andere ist unplausibel.
             if (m.ZahlungsintervallMonate != 12 && m.ZahlungsintervallMonate != 1 && m.ZahlungsintervallMonate != -1)
                 findings.Add(new("BEITRAG_INTERVALL", "Beitrag", FindingSeverity.Warnung,
                     $"Zahlungsintervall {m.ZahlungsintervallMonate} Monate ungewöhnlich – erwartet 12 (Jahresbeitrag §2)."));
             if (m.IndividuellerBeitrag < 0)
                 findings.Add(new("BEITRAG_NEGATIV", "Beitrag", FindingSeverity.Warnung,
                     "Individueller Beitrag negativ – prüfen."));
+            return klassen;
+        }
 
-            // ---------- 3. Nachweise für ermäßigt (Beitragsordnung §3 + §7 Abs. 1) ----------
+        /// <summary>Nachweise für ermäßigte Klassen (Beitragsordnung §3 + §7 Abs. 1).</summary>
+        private static void PruefeNachweise(MemberRecord m, List<string> klassen, int beitragsjahr, List<MemberFinding> findings)
+        {
             var brauchtNachweis = klassen.Contains("VB01") || klassen.Contains("VB02.1") || klassen.Contains("VB021") || klassen.Contains("VB2M");
             if (brauchtNachweis && string.IsNullOrWhiteSpace(m.NachweisDatei))
                 findings.Add(new("NACHWEIS_FEHLT", "Unterlagen", FindingSeverity.Warnung,
@@ -95,18 +151,12 @@ namespace TreasurerAutomation.Services.MemberAudit
                         (hatNachweis ? " Nachweis ist hinterlegt, Kartentyp (Münsterland/Jugendleiter/Ehrenamt) bei Bedarf prüfen." : " Kein Nachweis hinterlegt – bitte prüfen/hinterlegen.")));
                 }
             }
+        }
 
-            // ---------- 4. SEPA-Readiness (§7 Abs. 3) ----------
-            var soll = Beitragsordnung.SollBeitrag(m.GruppenKuerzel, m.Eintrittsdatum, beitragsjahr, m.Ehrenmitglied, m.FreiwilligerZusatz);
-            var basis = Beitragsordnung.SollBeitrag(m.GruppenKuerzel, m.Eintrittsdatum, beitragsjahr, m.Ehrenmitglied);
+        /// <summary>SEPA-Readiness (§7 Abs. 3). Gibt zurück, ob Lastschrift technisch möglich ist.</summary>
+        private static bool PruefeSepa(MemberRecord m, DateTime heute, List<MemberFinding> findings)
+        {
             var sepaFaehig = true;
-
-            if (m.Ehrenmitglied)
-            {
-                findings.Add(new("BEITRAG_EHRENMITGLIED", "Beitrag", FindingSeverity.Info,
-                    "Ehrenmitglied (§4 Abs. 3 Satzung) – von Beiträgen befreit, Soll 0€."));
-            }
-
             if (m.Zahlungsart == 1) // Lastschrift
             {
                 if (m.SepaEinverstaendnis != true)
@@ -123,7 +173,7 @@ namespace TreasurerAutomation.Services.MemberAudit
                 }
                 if (string.IsNullOrWhiteSpace(m.Bic))
                 {
-                    if (FieldValidators.IstAuslandsIban(m.Iban, m.Land))
+                    if (FieldValidators.IstAuslandsIban(m.Iban))
                     {
                         findings.Add(new("SEPA_BIC_FEHLT_AUSLAND", "Bank", FindingSeverity.Blocker,
                             "Auslands-IBAN ohne BIC – für SEPA-Einzug zwingend nötig."));
@@ -181,8 +231,15 @@ namespace TreasurerAutomation.Services.MemberAudit
             if (m.Zahlungsart == 1 && !string.IsNullOrWhiteSpace(m.KontoinhaberAbweichend))
                 findings.Add(new("BANK_ABWEICHEND", "Bank", FindingSeverity.Info,
                     $"Abweichender Kontoinhaber: {m.KontoinhaberAbweichend} (z.B. Elternkonto) – ok, Mandat muss dazu passen."));
+            return sepaFaehig;
+        }
 
-            // ---------- 5. Status / Mahnwesen (Satzung §5, Beitragsordnung §5) ----------
+        /// <summary>
+        /// Status/Termine (Kündigung, Datumsfolge) + Forderung (Rückstand, Säumnis, Mahnvorschlag).
+        /// </summary>
+        private static (int TageVerzug, decimal Saeumnis, string? MahnVorschlag) PruefeStatusUndForderung(
+            MemberRecord m, decimal soll, int beitragsjahr, DateTime heute, bool ausgetreten, List<MemberFinding> findings)
+        {
             if (m.Kuendigungsdatum.HasValue)
             {
                 if (!IstQuartalsendeMitFrist(m.Kuendigungsdatum.Value, m.Austrittsdatum))
@@ -194,7 +251,7 @@ namespace TreasurerAutomation.Services.MemberAudit
             }
             if (m.Saldo > 0 && !ausgetreten)
             {
-                if (soll > 0 && m.Saldo > soll)
+                if (IstStreichkandidat(m.Saldo, soll))
                     findings.Add(new("MAHN_STREICHKANDIDAT", "Mahnwesen", FindingSeverity.Blocker,
                         $"Saldo {m.Saldo:N2}€ übersteigt einen Jahresbeitrag (Soll {soll:N2}€) – Streichverfahren nach §5 Abs. 3 prüfen (2x Mahnung + 1 Monat + Androhung)."));
                 else
@@ -202,9 +259,8 @@ namespace TreasurerAutomation.Services.MemberAudit
                         $"Saldo {m.Saldo:N2}€ offen – Zahlungserinnerung/Mahnung prüfen (§5 Beitragsordnung: 1€/7T Säumnis, Mahn 5€/10€)."));
             }
 
-            // ---------- 6. Forderung: Säumniszuschlag + Mahnvorschlag (§5 Beitragsordnung) ----------
             // Fällig 01.02. (§2), Verzug ab Folgetag (Werktags-Regel vereinfacht: 02.02.).
-            // Zuschlag 1 € je angefangene? Nein: je volle 7 Kalendertage. Unverbindliche Rechenhilfe.
+            // Zuschlag je volle 7 Kalendertage. Unverbindliche Rechenhilfe.
             var (tageVerzug, saeumnis) = BerechneSaeumnis(m.Saldo, beitragsjahr, heute, ausgetreten);
             string? mahnVorschlag = null;
             if (m.Saldo > 0 && !ausgetreten)
@@ -221,28 +277,11 @@ namespace TreasurerAutomation.Services.MemberAudit
             if (m.Antragsdatum.HasValue && m.Aufnahmedatum.HasValue && m.Antragsdatum > m.Aufnahmedatum)
                 findings.Add(new("STATUS_DATUM_REIHENFOLGE", "Status", FindingSeverity.Warnung,
                     "Antragsdatum liegt nach Aufnahmedatum – Reihenfolge prüfen."));
-
-            var blocker = findings.Any(f => f.Severity == FindingSeverity.Blocker);
-            var einzugsfaehig = !blocker && !ausgetreten && (m.Zahlungsart == 1 || m.Zahlungsart == 2);
-            if (m.Ehrenmitglied) einzugsfaehig = !blocker && !ausgetreten; // Soll 0, nichts einzuziehen
-            var sepaEinziehbar = einzugsfaehig && m.Zahlungsart == 1 && sepaFaehig;
-
-            // Ehrenmitglied mit Soll 0 ist formal "einzugsfähig" (nichts zu tun) – klarstellen
-            if (m.Ehrenmitglied && !blocker) { einzugsfaehig = true; sepaEinziehbar = false; }
-
-            return new MemberAuditResult
-            {
-                Mitglied = m,
-                Findings = findings,
-                SollBeitrag = ausgetreten ? 0m : soll,
-                SollBasis = ausgetreten ? 0m : basis,
-                Einzugsfaehig = einzugsfaehig,
-                SepaEinziehbar = sepaEinziehbar,
-                TageVerzug = tageVerzug,
-                SaeumnisZuschlag = saeumnis,
-                MahnVorschlag = mahnVorschlag,
-            };
+            return (tageVerzug, saeumnis, mahnVorschlag);
         }
+
+        /// <summary>Rückstand über einem vollen Jahresbeitrag (Streichverfahren §5 Abs. 3).</summary>
+        private static bool IstStreichkandidat(decimal saldo, decimal soll) => soll > 0 && saldo > soll;
 
         /// <summary>
         /// Rechenhilfe zu §5 Beitragsordnung: 1,00 € je 7 Kalendertage Verzug auf den
@@ -264,10 +303,10 @@ namespace TreasurerAutomation.Services.MemberAudit
         /// </summary>
         public static string MahnVorschlagFuer(int tageVerzug, decimal saldo, decimal soll)
         {
-            if (soll > 0 && saldo > soll)
+            if (IstStreichkandidat(saldo, soll))
                 return "Streichverfahren prüfen (§5 Abs. 3 Satzung)";
-            if (tageVerzug >= 70) return "Mahnung 2 (10 €, 6 Wochen)";
-            if (tageVerzug >= 28) return "Mahnung 1 (5 €, 4 Wochen)";
+            if (tageVerzug >= MahnStufe2Tage) return "Mahnung 2 (10 €, 6 Wochen)";
+            if (tageVerzug >= MahnStufe1Tage) return "Mahnung 1 (5 €, 4 Wochen)";
             return "Zahlungserinnerung";
         }
 

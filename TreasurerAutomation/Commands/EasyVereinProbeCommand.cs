@@ -55,11 +55,13 @@ namespace TreasurerAutomation.Commands
     /// </summary>
     public class EasyVereinProbeCommand : AsyncCommand<EasyVereinProbeSettings>
     {
+        /// <summary>Max. Zeichen der Roh-JSON-Vorschau.</summary>
+        private const int MaxVorschauZeichen = 1500;
+
         protected override async Task<int> ExecuteAsync(CommandContext context, EasyVereinProbeSettings settings,
             CancellationToken cancellationToken)
         {
-            AnsiConsole.Write(new Rule("[yellow]easyVerein Lese-Probe (nur GET)[/]").RuleStyle("grey").LeftJustified());
-            Console.WriteLine();
+            ConsoleHelper.PrintHeader("easyVerein Lese-Probe (nur GET)");
 
             try
             {
@@ -90,8 +92,8 @@ namespace TreasurerAutomation.Commands
                 Console.WriteLine();
 
                 var json = JsonSerializer.Serialize(erste, new JsonSerializerOptions { WriteIndented = true });
-                if (json.Length > 1500)
-                    json = json.Substring(0, 1500) + "\n… (gekürzt)";
+                if (json.Length > MaxVorschauZeichen)
+                    json = json.Substring(0, MaxVorschauZeichen) + "\n… (gekürzt)";
                 AnsiConsole.MarkupLine("[grey]Erster Datensatz (roh):[/]");
                 AnsiConsole.WriteLine(json);
             }

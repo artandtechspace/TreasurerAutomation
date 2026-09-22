@@ -22,6 +22,8 @@ namespace TreasurerAutomation.Services.MemberAudit
     /// </summary>
     public static class FixPlanner
     {
+        private const int ZahlartLastschrift = 1;
+
         public static List<FixVorschlag> Plane(
             IReadOnlyList<MemberAuditResult> results,
             int beitragsjahr)
@@ -43,9 +45,8 @@ namespace TreasurerAutomation.Services.MemberAudit
                 PlaneEmailNorm(plaene, m, nr, name, m.CompanyEmail, "companyEmail");
 
                 // 2. Fehlende Mandatsreferenz erzeugen (nur wenn Rest SEPA-ok + Einwilligung Ja)
-                if (m.Zahlungsart == 1 && m.SepaEinverstaendnis == true
+                if (m.Zahlungsart == ZahlartLastschrift && HatSepaKern(m)
                     && string.IsNullOrWhiteSpace(m.Mandatsreferenz)
-                    && !string.IsNullOrWhiteSpace(m.Iban) && FieldValidators.IstGueltigeIban(m.Iban)
                     && m.Mandatsdatum.HasValue && m.Mandatsdatum.Value.Date <= DateTime.Today)
                 {
                     var neu = FreieMandatsref(m.Id, beitragsjahr, vergebeneRefs);
@@ -55,9 +56,8 @@ namespace TreasurerAutomation.Services.MemberAudit
                 }
 
                 // 3. Zahlungsart auf Lastschrift heben (nur wenn alles SEPA-ok + Einwilligung Ja)
-                if (m.Zahlungsart != 1 && m.SepaEinverstaendnis == true
-                    && !string.IsNullOrWhiteSpace(m.Iban) && FieldValidators.IstGueltigeIban(m.Iban)
-                    && !string.IsNullOrWhiteSpace(m.Mandatsreferenz) && m.Mandatsdatum.HasValue)
+                if (m.Zahlungsart != ZahlartLastschrift && HatSepaKern(m)
+                    && !string.IsNullOrWhiteSpace(m.Mandatsreferenz))
                 {
                     plaene.Add(new(m.Id, nr, name, "ZAHLART_LASTSCHRIFT", "methodOfPayment",
                         m.ZahlungsartText, "Lastschrift", true,
@@ -68,22 +68,18 @@ namespace TreasurerAutomation.Services.MemberAudit
                 if (m.GruppenKuerzel.Contains("VB01") && string.IsNullOrWhiteSpace(m.NachweisDatei))
                 {
                     var alter = m.AlterAm(new DateTime(beitragsjahr, 2, 1));
-                    if (alter is null)
+                    if (alter is null || alter <= 25)
                         plaene.Add(new(m.Id, nr, name, "NACHWEIS_ANFORDERN", "Nachweis ermäßigt",
                             "– fehlt", "Nachweis anfordern", false,
                             "VB01 braucht Schüler-/Studien-/Dienst- oder Karten-Nachweis (§7 Abs. 1)."));
-                    else if (alter > 25)
+                    else
                         plaene.Add(new(m.Id, nr, name, "GRUPPE_WECHSEL_VORSCHLAG", "memberGroups",
                             "VB01", "VB03 prüfen (60 €)", false,
                             $"Alter {alter}J am 01.02.{beitragsjahr}: VB01 nur mit Karte zulässig – sonst Wechsel auf VB03."));
-                    else
-                        plaene.Add(new(m.Id, nr, name, "NACHWEIS_ANFORDERN", "Nachweis ermäßigt",
-                            "– fehlt", "Nachweis anfordern", false,
-                            "VB01 braucht Schüler-/Studien-/Dienst- oder Karten-Nachweis (§7 Abs. 1)."));
                 }
 
                 // 5. Manuell: Lastschrift ohne Einwilligung -> Einwilligung anfordern (nie erfinden!)
-                if (m.Zahlungsart == 1 && m.SepaEinverstaendnis != true)
+                if (m.Zahlungsart == ZahlartLastschrift && m.SepaEinverstaendnis != true)
                 {
                     plaene.Add(new(m.Id, nr, name, "SEPA_EINWILLIGUNG_ANFORDERN", "SEPA-Einwilligung",
                         m.SepaEinverstaendnis is null ? "unbekannt" : "Nein",
@@ -98,6 +94,12 @@ namespace TreasurerAutomation.Services.MemberAudit
                 .ToList();
         }
 
+        /// <summary>SEPA-Kern: Einwilligung Ja + gültige IBAN + Mandatsdatum vorhanden.</summary>
+        private static bool HatSepaKern(MemberRecord m) =>
+            m.SepaEinverstaendnis == true
+            && !string.IsNullOrWhiteSpace(m.Iban) && FieldValidators.IstGueltigeIban(m.Iban)
+            && m.Mandatsdatum.HasValue;
+
         private static void PlaneEmailNorm(
             List<FixVorschlag> plaene, MemberRecord m,
             string? nr, string name, string? roh, string feld)
@@ -111,7 +113,7 @@ namespace TreasurerAutomation.Services.MemberAudit
             }
         }
 
-        internal static string FreieMandatsref(int memberId, int jahr, HashSet<string> vergeben)
+        private static string FreieMandatsref(int memberId, int jahr, HashSet<string> vergeben)
         {
             var basis = $"EV-{memberId}-{jahr}";
             if (!vergeben.Contains(basis)) return basis;

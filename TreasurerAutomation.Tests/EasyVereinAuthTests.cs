@@ -37,6 +37,7 @@ namespace TreasurerAutomation.Tests
         [InlineData("ats_luca.schoeneberg@artandtech.space", "ats", "ats_luca.schoeneberg@artandtech.space")]
         [InlineData("  luca@x.de  ", "ats", "ats_luca@x.de")]
         [InlineData("some@example.de", "abc", "abc_some@example.de")]
+        [InlineData("max_muster@mail.de", "ats", "ats_max_muster@mail.de")]
         public void NormalizeUsername_StelltOrgPrefixVoran(string eingabe, string org, string erwartet)
         {
             Assert.Equal(erwartet, EasyVereinLogin.NormalizeUsername(eingabe, org));
@@ -111,8 +112,9 @@ namespace TreasurerAutomation.Tests
         {
             var stub = new StubHandler(_ => JsonAntwort("""{"detail":"invalid"}""", HttpStatusCode.Unauthorized));
             var http = new HttpClient(stub) { BaseAddress = new Uri("https://easyverein.com/api/") };
-            var ex = await Assert.ThrowsAsync<Exception>(() =>
+            var ex = await Assert.ThrowsAsync<EasyVereinApiException>(() =>
                 EasyVereinClient.GetTokenAsync("ats_a@b.de", "falsch", null, http));
+            Assert.Equal(401, ex.StatusCode);
             Assert.Contains("401", ex.Message);
         }
 

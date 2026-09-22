@@ -1,11 +1,3 @@
-using System;
-using System.ComponentModel;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Text;
-using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
@@ -13,6 +5,13 @@ namespace TreasurerAutomation.Commands
 {
     public class EasyVereinTestSettings : GlobalSettings
     {
+        /// <summary>Nur easyVerein nötig (kein SumUp) – enger als GlobalSettings.Validate.</summary>
+        public override ValidationResult Validate()
+        {
+            if (string.IsNullOrEmpty(ResolvedEasyVereinToken))
+                return ValidationResult.Error("easyVerein-Token (login, EASYVEREIN_TOKEN / --easyverein-token)");
+            return ValidationResult.Success();
+        }
     }
 
     public class EasyVereinTestCommand : AsyncCommand<EasyVereinTestSettings>
@@ -20,9 +19,7 @@ namespace TreasurerAutomation.Commands
         protected override async Task<int> ExecuteAsync(CommandContext context, EasyVereinTestSettings settings,
             CancellationToken cancellationToken)
         {
-            AnsiConsole.Write(new Rule("[yellow]easyVerein API Connection & Upload Test[/]").RuleStyle("grey")
-                .LeftJustified());
-            Console.WriteLine();
+            ConsoleHelper.PrintHeader("easyVerein API Connection & Upload Test");
 
             var token = settings.ResolvedEasyVereinToken;
             using var easyVereinClient = new Services.EasyVereinClient(token);
@@ -65,7 +62,7 @@ namespace TreasurerAutomation.Commands
                 await AnsiConsole.Status()
                     .Spinner(Spinner.Known.Dots)
                     .SpinnerStyle(Style.Parse("blue bold"))
-                    .StartAsync("Führe easyVerein API-Test durch...", async ctx =>
+                    .StartAsync("Führe easyVerein API-Test durch...", async _ =>
                     {
                         // 1. Beleg erstellen
                         AnsiConsole.MarkupLine($" [blue]ℹ[/] Erstelle Beleg (Entwurf) mit Code '{referenceCode}'...");

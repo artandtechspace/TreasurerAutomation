@@ -34,8 +34,7 @@ namespace TreasurerAutomation.Commands
         protected override async Task<int> ExecuteAsync(CommandContext context, LoginSettings settings,
             CancellationToken cancellationToken)
         {
-            AnsiConsole.Write(new Rule("[yellow]easyVerein Login[/]").RuleStyle("grey").LeftJustified());
-            Console.WriteLine();
+            ConsoleHelper.PrintHeader("easyVerein Login");
 
             try
             {
@@ -68,7 +67,7 @@ namespace TreasurerAutomation.Commands
                 {
                     resp = await EasyVereinClient.GetTokenAsync(username, password, settings.TwoFA, cancellationToken: cancellationToken);
                 }
-                catch (Exception ex) when (settings.TwoFA is null && IstVielleicht2FAFehler(ex))
+                catch (EasyVereinApiException ex) when (settings.TwoFA is null && ex.StatusCode is 400 or 401 or 403)
                 {
                     // Einmalig 2FA nachfragen und erneut versuchen
                     var code = AnsiConsole.Prompt(new TextPrompt<string>("2FA-Code:").AllowEmpty());
@@ -98,11 +97,6 @@ namespace TreasurerAutomation.Commands
                 return 1;
             }
         }
-
-        private static bool IstVielleicht2FAFehler(Exception ex) =>
-            ex.Message.Contains("401", StringComparison.Ordinal) ||
-            ex.Message.Contains("400", StringComparison.Ordinal) ||
-            ex.Message.Contains("2FA", StringComparison.OrdinalIgnoreCase);
     }
 
     public sealed class LogoutCommand : AsyncCommand<CommandSettings>
@@ -155,7 +149,9 @@ namespace TreasurerAutomation.Commands
                     if (!string.IsNullOrWhiteSpace(resp.Token) && resp.Token != session.Token)
                     {
                         var neu = EasyVereinSession.FromTokenResponse(
-                            new EasyVereinTokenResponse(session.UserId, session.Email, false, resp.ExpiresIn > 0 ? resp.ExpiresIn : 30 * 86400, resp.Token));
+                            new EasyVereinTokenResponse(session.UserId, session.Email, false,
+                                resp.ExpiresIn > 0 ? resp.ExpiresIn : (int)TimeSpan.FromDays(EasyVereinSession.DefaultLifetimeDays).TotalSeconds,
+                                resp.Token));
                         neu.Save();
                         AnsiConsole.MarkupLine("[green]✔ Token erneuert.[/]");
                     }
