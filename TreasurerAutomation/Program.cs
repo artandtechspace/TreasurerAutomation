@@ -26,6 +26,8 @@ namespace TreasurerAutomation
                       .WithDescription("Reine Lese-Probe der easyVerein API (Endpunkt-Felder anzeigen, Vorbereitung Kassenprüfung).");
                 config.AddCommand<MemberAuditCommand>("member-audit")
                       .WithDescription("Prüft alle Mitglieder (Zustimmungen, Unterlagen, Stammdaten, SEPA-Readiness) read-only für den Beitragseinzug.");
+                config.AddCommand<MemberFixCommand>("member-fix")
+                      .WithDescription("Interaktiver Fix-Wizard für Audit-Blocker (dry-run ohne --apply, SEPA-Mandate via Typst).");
                 config.AddCommand<LoginCommand>("login")
                       .WithDescription("Interaktiver Login (Username/Passwort/2FA) via POST get-token, speichert Session für alle Befehle.");
                 config.AddCommand<LogoutCommand>("logout")

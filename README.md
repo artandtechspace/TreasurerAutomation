@@ -145,6 +145,25 @@ dotnet run -- member-audit --search "luca"   # mehrere Treffer -> interaktive Au
 # Exit 2 bei --fail-on-blocker wenn Blocker gefunden (CI-fähig)
 ```
 
+### Mitglieder-Fix (member-fix)
+
+Interaktiver Fix-Wizard auf Basis von `member-audit`. **Dry-Run ist Standard: ohne `--apply` wird nichts in easyVerein geschrieben** (nur angezeigt + lokale Dateien nach Bestätigung).
+
+- **Safe Auto-Fixes** (PATCH `contact-details`): `EMAIL_NORM` (Trim+lowercase), `MANDATSREF_NEU` (Vorschlag `EV-ID-Jahr`, nur bei Einwilligung+IBAN+Datum), `ZAHLART_LASTSCHRIFT` (nur wenn SEPA-Kern komplett).
+- **Nachgefragt statt erfunden:** IBAN (Mod97-geprüft, BIC bei Ausland Pflicht), Mandatsdatum (default heute). Einwilligung/Nachweis/Beitragsklasse werden nie gesetzt – nur als Anfrage geparkt.
+- **SEPA-Mandat:** `vorlagen/sepa-mandat/vorlage.typ` – erzeugt pro Mitglied mit SEPA-Blocker `JJJJMMTT_slug-nr_sepa-mandat.typ` (+ `.pdf` per `typst`). Ablauf: unterschreiben lassen → Referenz + Datum in easyVerein pflegen.
+- **Parken:** alles ohne Antwort landet in `fix-anfragen-JJJJ.csv` (+ Textbaustein). Antworten später mit `--member <ID> --apply` einpflegen.
+
+```bash
+cd TreasurerAutomation
+dotnet run -- member-fix                          # Dry-Run: Vorschläge zeigen, nichts schreiben
+dotnet run -- member-fix --apply                  # interaktiv bestätigen + schreiben
+dotnet run -- member-fix --apply --auto-only --yes  # nur Auto-Fixes, ohne Rückfrage
+dotnet run -- member-fix --member 42 --apply      # nur ein Mitglied
+dotnet run -- member-fix --sepa-mandat --glaeubiger-id "DE00ZZZ00000000000"
+# Token: --easyverein-token > EASYVEREIN_TOKEN > login-Session
+```
+
 ### Login / Session (get-token, refresh-token)
 
 Interaktiver Login statt Token kopieren. Username wird automatisch als `$orgShort_$email` gebaut (z.B. `ats_luca.schoeneberg@artandtech.space`):
